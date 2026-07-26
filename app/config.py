@@ -15,9 +15,9 @@ class Settings(BaseSettings):
     whatsapp_access_token: str = ""
     whatsapp_webhook_verify_token: str = "jaaykatbi_webhook_2026"
 
-    # LLM (Gemini 2.5 Flash-Lite, free tier for MVP validation)
+    # LLM (Gemini, free tier for MVP validation)
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_model: str = "gemini-flash-lite-latest"
 
     # App
     app_base_url: str = "http://localhost:8000"

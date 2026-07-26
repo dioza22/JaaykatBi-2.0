@@ -18,7 +18,7 @@ admin" hypothesis.
   `Conversation.state` (a JSONB column) tracks which flow/step/slots are active, so
   multi-step things like "take an order" or "add a product" don't depend on an LLM
   remembering where it left off.
-- **Gemini 2.5 Flash-Lite** (free tier) is only consulted for open-ended catalog
+- **Gemini** (`gemini-flash-lite-latest`, free tier) is only consulted for open-ended catalog
   Q&A / general chat fallback — `app/services/ai/`. Swappable behind
   `LLMClient` if a paid model is needed later.
 
@@ -64,7 +64,7 @@ Health check: `GET http://localhost:8000/api/health`.
 | `WHATSAPP_ACCESS_TOKEN` | Same page — use a permanent token for anything beyond quick testing |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | A string you choose; must match what you enter in the Meta webhook config |
 | `GEMINI_API_KEY` | From [Google AI Studio](https://aistudio.google.com/apikey) (free tier) |
-| `GEMINI_MODEL` | Defaults to `gemini-2.5-flash-lite` |
+| `GEMINI_MODEL` | Defaults to `gemini-flash-lite-latest` (Google's floating alias to their current lite-flash model — pinned model names get retired for new API keys surprisingly fast, e.g. `gemini-2.5-flash-lite` was already gone by the time this project's key was created) |
 
 ### Connecting a real WhatsApp number
 
