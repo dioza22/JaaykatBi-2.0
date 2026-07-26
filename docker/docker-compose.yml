@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: jaaykatbi
+      POSTGRES_PASSWORD: jaaykatbi
+      POSTGRES_DB: jaaykatbi
+    ports:
+      - "5434:5432"
+    volumes:
+      - jaaykatbi_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jaaykatbi -d jaaykatbi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://jaaykatbi:jaaykatbi@db:5432/jaaykatbi
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+networks:
+  default:
+    name: jaaykatbi-network
+
+volumes:
+  jaaykatbi_db_data:

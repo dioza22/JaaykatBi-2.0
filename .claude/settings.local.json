@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"/c/Users/mamad/source/repos/JaaykatBi 2.0\" 2>&1; echo \"---\"; ls -la \"/c/Users/mamad/source/repos/\" 2>&1)",
+      "Bash(pandoc -t markdown \"/c/Users/mamad/source/repos/JaaykatBi 2.0/docs/Charte Conversationnelle Jaaykat Bi.docx\")",
+      "PowerShell(Get-Command pandoc -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Command soffice -ErrorAction SilentlyContinue)"
+    ]
+  }
+}
