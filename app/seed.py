@@ -14,7 +14,7 @@ from app.db import SessionLocal
 from app.models import FAQ, Business, Contact, Product, Promotion
 
 TERANGA_WHATSAPP_NUMBER = "15551716750"  # Meta sandbox test number for this project's WhatsApp app
-TERANGA_OWNER_WHATSAPP_NUMBER = "221770009999"  # Moussa's personal number -> merchant admin access
+TERANGA_OWNER_WHATSAPP_NUMBER = "221765575673"  # merchant's real WhatsApp number -> merchant admin access
 
 
 async def seed() -> None:
