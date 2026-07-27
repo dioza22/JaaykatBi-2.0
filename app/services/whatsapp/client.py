@@ -2,13 +2,24 @@
 WhatsApp API's own constraints (and the old C# WhatsAppService, which already
 got these right)."""
 
+import asyncio
+import logging
 import re
 
 import httpx
 
 from app.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 _settings = get_settings()
+
+# Meta's sandbox test numbers hit short-lived rate limits under rapid testing
+# (observed as 400/403, not just the more obvious 429) — a couple of retries
+# with backoff is enough for those to clear. Without this, a rate-limited send
+# was just dropped silently and the merchant never got a reply.
+_RETRYABLE_STATUS_CODES = {400, 403, 429, 500, 502, 503, 504}
+_RETRY_DELAYS_SECONDS = [1, 3]  # 3 attempts total
 
 
 def normalize_phone_number(raw: str) -> str:
@@ -29,10 +40,28 @@ class WhatsAppClient:
 
     async def _post(self, payload: dict) -> dict:
         url = f"{self._base_url}/{self._phone_number_id}/messages"
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(url, headers=self._headers, json=payload)
-            response.raise_for_status()
-            return response.json()
+        attempts = len(_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(attempts):
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(url, headers=self._headers, json=payload)
+            if response.status_code < 400:
+                return response.json()
+
+            is_last_attempt = attempt == attempts - 1
+            if response.status_code not in _RETRYABLE_STATUS_CODES or is_last_attempt:
+                logger.warning(
+                    "WhatsApp API call failed permanently after %d attempt(s): %s %s",
+                    attempt + 1, response.status_code, response.text,
+                )
+                response.raise_for_status()
+
+            logger.warning(
+                "WhatsApp API call failed (attempt %d/%d): %s %s — retrying in %ds",
+                attempt + 1, attempts, response.status_code, response.text, _RETRY_DELAYS_SECONDS[attempt],
+            )
+            await asyncio.sleep(_RETRY_DELAYS_SECONDS[attempt])
+
+        raise AssertionError("unreachable")  # loop always returns or raises above
 
     async def send_text(self, to: str, body: str) -> dict:
         return await self._post(
