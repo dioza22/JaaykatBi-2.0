@@ -130,6 +130,12 @@ async def _get_or_create_conversation(db: AsyncSession, business: Business, cont
 async def _handle_inbound(db: AsyncSession, whatsapp_client: WhatsAppClient, inbound: InboundMessage) -> None:
     business = await _get_or_create_business(db, inbound)
     if business is None:
+        logger.warning(
+            "No business matched for inbound message: display_phone_number=%r normalized=%r wa_id=%r",
+            inbound.business_whatsapp_number,
+            normalize_phone_number(inbound.business_whatsapp_number),
+            inbound.wa_id,
+        )
         return  # unknown business number — nothing we can do
 
     contact = await _get_or_create_contact(db, business, inbound)
