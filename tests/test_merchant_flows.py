@@ -14,8 +14,8 @@ from app.models import (
     Product,
     Promotion,
 )
+from app.services.conversation import engine, state
 from app.services.conversation.engine import handle_message
-from app.services.conversation import state
 from app.services.orders.service import create_order
 
 pytestmark = pytest.mark.asyncio
@@ -414,3 +414,36 @@ async def test_messages_en_attente_lists_flagged_conversations(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, "messages en attente")
     assert "Client Perdu" in reply.text
     assert "221770009999" in reply.text
+
+
+async def test_merchant_unmatched_question_falls_back_to_llm(db_session, monkeypatch):
+    business, product, contact, conversation = await _setup(db_session)
+
+    captured_prompt = {}
+
+    async def fake_generate(system_prompt, history, text):
+        captured_prompt["value"] = system_prompt
+        return "Votre produit le plus cher est Riz parfumé 5 kg à 4500 FCFA."
+
+    monkeypatch.setattr(engine._llm_client, "generate", fake_generate)
+
+    reply = await _merchant_says(
+        db_session, business, contact, conversation, "Quel est mon produit le plus cher ?"
+    )
+    assert "4500 FCFA" in reply.text
+    assert len(_row_titles(reply)) == 9  # menu re-attached, same as every other merchant reply
+    assert "Riz parfumé 5 kg" in captured_prompt["value"]  # catalog context reached the LLM
+    assert conversation.state.get("flow") is None  # this is a plain Q&A, not a flow
+
+
+async def test_merchant_llm_fallback_failure_gives_a_plain_retry_message(db_session, monkeypatch):
+    business, product, contact, conversation = await _setup(db_session)
+
+    async def fake_generate_failure(system_prompt, history, text):
+        return None
+
+    monkeypatch.setattr(engine._llm_client, "generate", fake_generate_failure)
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Quel est mon produit le plus cher ?")
+    assert "reformuler" in reply.text.lower()
+    assert len(_row_titles(reply)) == 9

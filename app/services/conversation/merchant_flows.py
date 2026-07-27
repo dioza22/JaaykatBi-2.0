@@ -272,7 +272,11 @@ async def _pending_human_handoffs(db: AsyncSession, business: Business) -> str:
     return "Messages en attente d'une réponse humaine :\n" + "\n".join(lines)
 
 
-async def handle_intent(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
+async def handle_intent(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply | None:
+    """Returns None when nothing in the menu matches — the caller (engine.py)
+    then tries the LLM for an ad-hoc question about the merchant's own shop
+    before giving up, same as the customer side falls back past its FAQ/intent
+    matches."""
     order_command_reply = await _handle_order_command(db, business, text)
     if order_command_reply is not None:
         return with_merchant_menu(order_command_reply)
@@ -345,7 +349,7 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
     if intent == Intent.MESSAGES_EN_ATTENTE:
         return with_merchant_menu(await _pending_human_handoffs(db, business))
 
-    return with_merchant_menu("Je n'ai pas compris. Que souhaitez-vous faire ?")
+    return None
 
 
 async def continue_flow(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
