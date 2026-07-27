@@ -40,6 +40,11 @@ async def process_webhook(db: AsyncSession, whatsapp_client: WhatsAppClient, pay
     if payload.object != "whatsapp_business_account":
         return
 
+    fields = [change.field for entry in payload.entry for change in entry.changes]
+    inbound_count = sum(len(change.value.messages) for entry in payload.entry for change in entry.changes)
+    status_count = sum(len(change.value.statuses) for entry in payload.entry for change in entry.changes)
+    logger.info("webhook received: fields=%s messages=%d statuses=%d", fields, inbound_count, status_count)
+
     for status in parse_statuses(payload):
         await _update_message_status(db, status)
 
