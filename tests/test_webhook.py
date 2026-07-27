@@ -66,6 +66,26 @@ SAMPLE_STATUS_PAYLOAD = {
 }
 
 
+# Meta also sends webhooks for other subscribed fields (account alerts,
+# template status, etc.) with a value shape that has no metadata at all —
+# a real one seen in testing looked like {"entity_type": "WABA", ...}. This
+# must not blow up validation for the whole payload.
+ACCOUNT_LEVEL_PAYLOAD = {
+    "object": "whatsapp_business_account",
+    "entry": [
+        {
+            "id": "ENTRY_ID",
+            "changes": [
+                {
+                    "field": "account_update",
+                    "value": {"entity_type": "WABA", "some_other_field": "no status"},
+                }
+            ],
+        }
+    ],
+}
+
+
 def test_parse_inbound_messages_extracts_text():
     payload = WhatsAppWebhookPayload.model_validate(SAMPLE_TEXT_PAYLOAD)
     messages = parse_inbound_messages(payload)
@@ -122,6 +142,12 @@ async def test_webhook_verify_rejects_wrong_token():
             },
         )
     assert resp.status_code == 403
+
+
+def test_account_level_payload_does_not_crash_parsing():
+    payload = WhatsAppWebhookPayload.model_validate(ACCOUNT_LEVEL_PAYLOAD)
+    assert parse_inbound_messages(payload) == []
+    assert parse_statuses(payload) == []
 
 
 async def test_webhook_post_returns_immediately():

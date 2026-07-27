@@ -28,7 +28,7 @@ def parse_inbound_messages(payload: WhatsAppWebhookPayload) -> list[InboundMessa
             if change.field != "messages":
                 continue
             value = change.value
-            if not value.messages:
+            if value.metadata is None or not value.messages:
                 continue
             names_by_wa_id = {c.wa_id: (c.profile.name if c.profile else None) for c in value.contacts}
             for message in value.messages:

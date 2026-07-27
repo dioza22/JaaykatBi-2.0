@@ -78,9 +78,17 @@ class Metadata(BaseModel):
 
 
 class WAValue(BaseModel):
+    """`value`'s shape depends on `WAChange.field` — a `messages` change has
+    metadata/contacts/messages/statuses, but Meta also sends webhooks for
+    other subscribed fields (account alerts, template status, business
+    capability updates, etc.) with a completely different shape. Everything
+    here is optional so those don't fail validation for the whole payload —
+    webhook_parser.py filters to `field == "messages"` and skips anything
+    without metadata."""
+
     model_config = ConfigDict(extra="ignore")
     messaging_product: str | None = None
-    metadata: Metadata
+    metadata: Metadata | None = None
     contacts: list[WAContact] = Field(default_factory=list)
     messages: list[WAMessage] = Field(default_factory=list)
     statuses: list[WAStatus] = Field(default_factory=list)
