@@ -20,7 +20,7 @@ from app.services.conversation import state
 from app.services.conversation.intents import Intent, detect_intent
 from app.services.conversation.product_lookup import resolve_product
 from app.services.conversation.reply import ANNULER_SECTION, BotReply, with_cancel_button, with_merchant_menu
-from app.services.orders.service import cancel_order, confirm_order, fulfill_order
+from app.services.orders.service import cancel_order, confirm_order, fulfill_order, get_active_promotion
 
 ADD_PRODUCT_FLOW = "ajouter_produit"
 EDIT_PRODUCT_FLOW = "modifier_produit"
@@ -46,6 +46,18 @@ _PROMO_DURATION_SECTIONS = [
     ("Durée", [("3", "3 jours", ""), ("7", "7 jours", ""), ("14", "14 jours", "")]),
     ANNULER_SECTION,
 ]
+_PROMO_MODE_SECTIONS = [
+    (
+        "Mode",
+        [
+            ("single", "Un produit", "Choisir un seul produit"),
+            ("category", "Toute une catégorie", "Appliquer à tous les produits d'une catégorie"),
+            ("multi", "Plusieurs produits", "Choisir plusieurs produits, un par un"),
+        ],
+    ),
+    ANNULER_SECTION,
+]
+_ADD_ANOTHER_BUTTONS = [("add_more", "Ajouter un autre"), ("done", "Terminé"), ("annuler", "Annuler")]
 
 
 async def _products(db: AsyncSession, business_id: UUID) -> list[Product]:
@@ -56,7 +68,10 @@ async def _products(db: AsyncSession, business_id: UUID) -> list[Product]:
     ).scalars().all()
 
 
-def _product_list_sections(products: list[Product]) -> list[tuple[str, list[tuple[str, str, str]]]]:
+def _product_list_sections(
+    products: list[Product], exclude_ids: set[str] | None = None
+) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    exclude_ids = exclude_ids or set()
     rows = [
         (
             str(p.id),
@@ -64,8 +79,37 @@ def _product_list_sections(products: list[Product]) -> list[tuple[str, list[tupl
             f"{int(p.price_xof)} FCFA" + (" (indisponible)" if not p.is_available else ""),
         )
         for p in products
+        if str(p.id) not in exclude_ids
     ]
     return [("Produits", rows), ANNULER_SECTION]
+
+
+def _distinct_categories(products: list[Product]) -> list[tuple[str, int]]:
+    """[(category_name, product_count)], "Sans catégorie" bucket for None,
+    stable order (first-seen)."""
+    counts: dict[str, int] = {}
+    for p in products:
+        name = p.category or "Sans catégorie"
+        counts[name] = counts.get(name, 0) + 1
+    return list(counts.items())
+
+
+def _category_list_sections(products: list[Product]) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    rows = [(name, name, f"{count} produit(s)") for name, count in _distinct_categories(products)]
+    return [("Catégories", rows), ANNULER_SECTION]
+
+
+def _resolve_category(text: str, categories: list[tuple[str, int]]) -> str | None:
+    stripped = text.strip()
+    if stripped.isdigit():
+        idx = int(stripped)
+        if 1 <= idx <= len(categories):
+            return categories[idx - 1][0]
+    text_lower = stripped.lower()
+    for name, _count in categories:
+        if name.lower() in text_lower or text_lower in name.lower():
+            return name
+    return None
 
 
 async def _catalog_message(db: AsyncSession, business: Business) -> str:
@@ -82,11 +126,17 @@ async def _catalog_message(db: AsyncSession, business: Business) -> str:
         lines.append(f"*{category}*")
         for p in items:
             avail = " (indisponible)" if not p.is_available else ""
+            promo = await get_active_promotion(db, p.id)
+            if promo:
+                discounted = promo.calculate_discounted_price(p.price_xof)
+                price_line = f"~{int(p.price_xof)}~ {int(discounted)} FCFA 🏷️ PROMO -{promo.discount_percent}%"
+            else:
+                price_line = f"{int(p.price_xof)} FCFA"
             if p.track_inventory:
                 stock_line = f"Stock actuel : {p.quantity_in_stock} / initial : {p.initial_stock}"
             else:
                 stock_line = "Stock non suivi"
-            lines.append(f"- {p.name}{avail} — {int(p.price_xof)} FCFA — {stock_line}")
+            lines.append(f"- {p.name}{avail} — {price_line} — {stock_line}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -230,9 +280,9 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
             return with_merchant_menu("Vous n'avez aucun produit pour lancer une promotion.")
         state.start_flow(conversation, PROMOTION_FLOW)
         return BotReply(
-            text="Quel produit souhaitez-vous mettre en promotion ?",
+            text="Comment souhaitez-vous sélectionner les produits ?",
             list_button_text="Choisir",
-            list_sections=_product_list_sections(products),
+            list_sections=_PROMO_MODE_SECTIONS,
         )
 
     if intent == Intent.CONSULTER_VENTES:
@@ -443,7 +493,39 @@ async def _continue_promotion(db: AsyncSession, business: Business, conversation
     slots = state.current_slots(conversation)
     products = await _products(db, business.id)
 
+    # --- Step 0: how to select which products get this promotion ---
     if step == 0:
+        t = text.strip().lower()
+        if "categ" in t or "catégorie" in text.lower():
+            state.advance(conversation, 20, slots)
+            return BotReply(
+                text="Quelle catégorie souhaitez-vous mettre en promotion ?",
+                list_button_text="Choisir",
+                list_sections=_category_list_sections(products),
+            )
+        if "plusieurs" in t or "multi" in t:
+            slots["product_ids"] = []
+            state.advance(conversation, 30, slots)
+            return BotReply(
+                text="Choisissez un premier produit :",
+                list_button_text="Choisir",
+                list_sections=_product_list_sections(products),
+            )
+        if "un produit" in t or "single" in t or "seul" in t:
+            state.advance(conversation, 10, slots)
+            return BotReply(
+                text="Quel produit souhaitez-vous mettre en promotion ?",
+                list_button_text="Choisir",
+                list_sections=_product_list_sections(products),
+            )
+        return BotReply(
+            text="Comment souhaitez-vous sélectionner les produits ?",
+            list_button_text="Choisir",
+            list_sections=_PROMO_MODE_SECTIONS,
+        )
+
+    # --- Step 10: single product ---
+    if step == 10:
         product = resolve_product(text, products)
         if product is None:
             return BotReply(
@@ -451,51 +533,117 @@ async def _continue_promotion(db: AsyncSession, business: Business, conversation
                 list_button_text="Choisir",
                 list_sections=_product_list_sections(products),
             )
-        slots["product_id"] = str(product.id)
-        state.advance(conversation, 1, slots)
+        slots["product_ids"] = [str(product.id)]
+        state.advance(conversation, 40, slots)
         return with_cancel_button("Quel pourcentage de réduction ? (ex : 10)")
 
-    if step == 1:
+    # --- Step 20: whole category ---
+    if step == 20:
+        categories = _distinct_categories(products)
+        category = _resolve_category(text, categories)
+        if category is None:
+            return BotReply(
+                text="Catégorie introuvable. Choisissez dans la liste :",
+                list_button_text="Choisir",
+                list_sections=_category_list_sections(products),
+            )
+        slots["category"] = category
+        slots["product_ids"] = [
+            str(p.id) for p in products if (p.category or "Sans catégorie") == category
+        ]
+        state.advance(conversation, 40, slots)
+        return with_cancel_button(f"Quel pourcentage de réduction pour la catégorie « {category} » ? (ex : 10)")
+
+    # --- Step 30/31: multi-select loop ---
+    if step == 30:
+        already = set(slots.get("product_ids", []))
+        remaining = [p for p in products if str(p.id) not in already]
+        product = resolve_product(text, remaining)
+        if product is None:
+            return BotReply(
+                text="Produit introuvable. Choisissez dans la liste :",
+                list_button_text="Choisir",
+                list_sections=_product_list_sections(products, exclude_ids=already),
+            )
+        slots.setdefault("product_ids", []).append(str(product.id))
+        state.advance(conversation, 31, slots)
+        count = len(slots["product_ids"])
+        return BotReply(
+            text=f"{product.name} ajouté ({count} sélectionné(s)). Voulez-vous en ajouter un autre ?",
+            buttons=_ADD_ANOTHER_BUTTONS,
+        )
+
+    if step == 31:
+        t = text.strip().lower()
+        if "ajouter" in t:
+            already = set(slots.get("product_ids", []))
+            remaining = [p for p in products if str(p.id) not in already]
+            if not remaining:
+                state.advance(conversation, 40, slots)
+                return with_cancel_button("Tous les produits sont déjà sélectionnés. Quel pourcentage de réduction ?")
+            state.advance(conversation, 30, slots)
+            return BotReply(
+                text="Choisissez un autre produit :",
+                list_button_text="Choisir",
+                list_sections=_product_list_sections(products, exclude_ids=already),
+            )
+        if "termin" in t or "fini" in t or t == "non":
+            state.advance(conversation, 40, slots)
+            return with_cancel_button("Quel pourcentage de réduction pour ces produits ? (ex : 10)")
+        return BotReply(text="Voulez-vous ajouter un autre produit ?", buttons=_ADD_ANOTHER_BUTTONS)
+
+    # --- Steps 40-42: shared discount % / duration / confirm, regardless of mode ---
+    if step == 40:
         match = re.search(r"\d+", text)
         if not match or not (0 < int(match.group()) < 100):
             return with_cancel_button("Merci d'indiquer un pourcentage valide entre 1 et 99.")
         slots["discount_percent"] = int(match.group())
-        state.advance(conversation, 2, slots)
+        state.advance(conversation, 41, slots)
         return BotReply(
             text="Pendant combien de jours ?", list_button_text="Choisir", list_sections=_PROMO_DURATION_SECTIONS
         )
 
-    if step == 2:
+    if step == 41:
         match = re.search(r"\d+", text)
         if not match or int(match.group()) <= 0:
             return BotReply(
-            text="Pendant combien de jours ?", list_button_text="Choisir", list_sections=_PROMO_DURATION_SECTIONS
-        )
+                text="Pendant combien de jours ?", list_button_text="Choisir", list_sections=_PROMO_DURATION_SECTIONS
+            )
         slots["duration_days"] = int(match.group())
-        state.advance(conversation, 3, slots)
-        product = await db.get(Product, UUID(slots["product_id"]))
-        discounted = round(float(product.price_xof) * (1 - slots["discount_percent"] / 100), 2)
+        state.advance(conversation, 42, slots)
+
+        product_ids = slots["product_ids"]
+        selected = [p for p in products if str(p.id) in set(product_ids)]
+        lines = [
+            f"- {p.name} : {int(p.price_xof)} → {int(round(float(p.price_xof) * (1 - slots['discount_percent'] / 100), 2))} FCFA"
+            for p in selected
+        ]
         recap = (
-            f"Promotion : {product.name} à {int(discounted)} FCFA (au lieu de {int(product.price_xof)} FCFA) "
-            f"pendant {slots['duration_days']} jours."
+            f"Promotion de {slots['discount_percent']}% pendant {slots['duration_days']} jours sur "
+            f"{len(selected)} produit(s) :\n" + "\n".join(lines)
         )
         return BotReply(text=recap, buttons=_CONFIRM_BUTTONS)
 
-    if step == 3:
+    if step == 42:
         if "confirmer" not in text.lower():
             return BotReply(text="Voulez-vous activer cette promotion ?", buttons=_CONFIRM_BUTTONS)
-        product = await db.get(Product, UUID(slots["product_id"]))
-        promo = Promotion(
-            business_id=business.id,
-            product_id=product.id,
-            title=f"Promo {slots['discount_percent']}%",
-            discount_percent=slots["discount_percent"],
-            duration_days=slots["duration_days"],
-            end_date=datetime.now(UTC) + timedelta(days=slots["duration_days"]),
-        )
-        db.add(promo)
+        product_ids = slots["product_ids"]
+        end_date = datetime.now(UTC) + timedelta(days=slots["duration_days"])
+        for product_id in product_ids:
+            db.add(
+                Promotion(
+                    business_id=business.id,
+                    product_id=UUID(product_id),
+                    title=f"Promo {slots['discount_percent']}%",
+                    discount_percent=slots["discount_percent"],
+                    duration_days=slots["duration_days"],
+                    end_date=end_date,
+                )
+            )
         state.clear_flow(conversation)
-        return with_merchant_menu(f"Promotion activée sur {product.name}. -- Jaaykat bi")
+        count = len(product_ids)
+        label = "produit" if count == 1 else "produits"
+        return with_merchant_menu(f"Promotion activée sur {count} {label}. -- Jaaykat bi")
 
     state.clear_flow(conversation)
     return with_merchant_menu("Que souhaitez-vous faire ?")

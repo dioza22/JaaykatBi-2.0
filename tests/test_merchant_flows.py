@@ -152,20 +152,109 @@ async def test_delete_product_flow_deactivates_instead_of_hard_delete(db_session
     assert still_there is not None
 
 
-async def test_launch_promotion_flow_creates_promotion(db_session):
+async def test_launch_promotion_single_product_mode(db_session):
     business, product, contact, conversation = await _setup(db_session)
 
     reply = await _merchant_says(db_session, business, contact, conversation, "lancer une promotion")
+    assert set(_row_titles(reply)) == {"Un produit", "Toute une catégorie", "Plusieurs produits", "Annuler"}
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Un produit")
     assert "Annuler" in _row_titles(reply)
+
     await _merchant_says(db_session, business, contact, conversation, "1")
     reply = await _merchant_says(db_session, business, contact, conversation, "10")
     assert set(_row_titles(reply)) == {"3 jours", "7 jours", "14 jours", "Annuler"}
 
     reply = await _merchant_says(db_session, business, contact, conversation, "7")
     assert set(_button_titles(reply)) == {"Confirmer", "Annuler"}
+    assert product.name in reply.text
 
     reply = await _merchant_says(db_session, business, contact, conversation, "confirmer")
-    assert "Promotion activée" in reply.text
+    assert "Promotion activée sur 1 produit" in reply.text
+
+    promo = await db_session.scalar(select(Promotion).where(Promotion.product_id == product.id))
+    assert promo is not None
+    assert promo.discount_percent == 10
+    assert promo.duration_days == 7
+
+
+async def test_launch_promotion_category_mode_applies_to_every_product_in_category(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    product.category = "Céréales"
+    other_product = Product(
+        business_id=business.id, name="Sucre en poudre", category="Céréales", price_xof=800,
+    )
+    other_category_product = Product(
+        business_id=business.id, name="Savon karité", category="Beauté", price_xof=1500,
+    )
+    db_session.add_all([other_product, other_category_product])
+    await db_session.flush()
+
+    await _merchant_says(db_session, business, contact, conversation, "lancer une promotion")
+    reply = await _merchant_says(db_session, business, contact, conversation, "Toute une catégorie")
+    assert set(_row_titles(reply)) == {"Céréales", "Beauté", "Annuler"}
+
+    await _merchant_says(db_session, business, contact, conversation, "Céréales")
+    reply = await _merchant_says(db_session, business, contact, conversation, "20")
+    await _merchant_says(db_session, business, contact, conversation, "3")
+    reply = await _merchant_says(db_session, business, contact, conversation, "confirmer")
+    assert "Promotion activée sur 2 produits" in reply.text
+
+    promos = (await db_session.execute(select(Promotion).where(Promotion.business_id == business.id))).scalars().all()
+    promo_product_ids = {p.product_id for p in promos}
+    assert promo_product_ids == {product.id, other_product.id}  # not the "Beauté" one
+    assert all(p.discount_percent == 20 and p.duration_days == 3 for p in promos)
+
+
+async def test_launch_promotion_multi_select_mode_across_categories(db_session):
+    business, product, contact, conversation = await _setup(db_session)  # "Riz parfumé 5 kg", no category
+    beauty_product = Product(
+        business_id=business.id, name="Savon karité", category="Beauté", price_xof=1500,
+    )
+    db_session.add(beauty_product)
+    await db_session.flush()
+
+    await _merchant_says(db_session, business, contact, conversation, "lancer une promotion")
+    reply = await _merchant_says(db_session, business, contact, conversation, "Plusieurs produits")
+    assert product.name in _row_titles(reply)
+    assert beauty_product.name in _row_titles(reply)
+
+    reply = await _merchant_says(db_session, business, contact, conversation, product.name)
+    assert set(_button_titles(reply)) == {"Ajouter un autre", "Terminé", "Annuler"}
+    assert "1 sélectionné" in reply.text
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Ajouter un autre")
+    assert beauty_product.name in _row_titles(reply)
+    assert product.name not in _row_titles(reply)  # already picked, excluded from the remaining list
+
+    await _merchant_says(db_session, business, contact, conversation, beauty_product.name)
+    reply = await _merchant_says(db_session, business, contact, conversation, "Terminé")
+    assert "réduction" in reply.text.lower()
+
+    await _merchant_says(db_session, business, contact, conversation, "15")
+    reply = await _merchant_says(db_session, business, contact, conversation, "14")
+    assert "2 produit" in reply.text
+    reply = await _merchant_says(db_session, business, contact, conversation, "confirmer")
+    assert "Promotion activée sur 2 produits" in reply.text
+
+    promos = (await db_session.execute(select(Promotion).where(Promotion.business_id == business.id))).scalars().all()
+    assert {p.product_id for p in promos} == {product.id, beauty_product.id}
+
+
+async def test_catalog_view_shows_promo_tag_and_updated_price(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    db_session.add(
+        Promotion(
+            business_id=business.id, product_id=product.id, title="Promo -10%",
+            discount_percent=10, duration_days=7, end_date=datetime.now(UTC) + timedelta(days=7),
+        )
+    )
+    await db_session.flush()
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "voir le catalogue")
+    assert "🏷️ PROMO -10%" in reply.text
+    assert "~4500~" in reply.text
+    assert "4050 FCFA" in reply.text
 
     promo = await db_session.scalar(select(Promotion).where(Promotion.product_id == product.id))
     assert promo is not None
