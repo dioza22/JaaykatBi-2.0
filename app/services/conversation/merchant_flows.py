@@ -19,7 +19,7 @@ from app.models import Business, Contact, Conversation, Order, OrderStatus, Prod
 from app.services.conversation import state
 from app.services.conversation.intents import Intent, detect_intent
 from app.services.conversation.product_lookup import resolve_product
-from app.services.conversation.reply import BotReply, with_cancel_button, with_merchant_menu
+from app.services.conversation.reply import ANNULER_SECTION, BotReply, with_cancel_button, with_merchant_menu
 from app.services.orders.service import cancel_order, confirm_order, fulfill_order
 
 ADD_PRODUCT_FLOW = "ajouter_produit"
@@ -30,9 +30,22 @@ PROMOTION_FLOW = "lancer_promotion"
 _ORDER_COMMAND_RE = re.compile(r"^(CMD-\d{8}-\d{4})\s+(confirmer|livrer|annuler)$", re.IGNORECASE)
 
 _CONFIRM_BUTTONS = [("confirm", "Confirmer"), ("cancel", "Annuler")]
-_YES_NO_BUTTONS = [("oui", "Oui"), ("non", "Non")]
-_EDIT_FIELD_BUTTONS = [("prix", "Prix"), ("stock", "Stock"), ("disponibilite", "Disponibilité")]
-_PROMO_DURATION_BUTTONS = [("3", "3 jours"), ("7", "7 jours"), ("14", "14 jours")]
+# Oui/Non decisions always carry a 3rd "Annuler" button — still within
+# WhatsApp's 3-button cap, and gives every yes/no step a visible way out.
+_YES_NO_BUTTONS = [("oui", "Oui"), ("non", "Non"), ("annuler", "Annuler")]
+
+# These three were previously full 3-option button sets (no room left for a
+# 4th "Annuler" button), so they're lists instead — a real-options section
+# plus the shared "Autre"/Annuler section, same pattern as the product-picker
+# lists below.
+_EDIT_FIELD_SECTIONS = [
+    ("Que modifier ?", [("prix", "Prix", ""), ("stock", "Stock", ""), ("disponibilite", "Disponibilité", "")]),
+    ANNULER_SECTION,
+]
+_PROMO_DURATION_SECTIONS = [
+    ("Durée", [("3", "3 jours", ""), ("7", "7 jours", ""), ("14", "14 jours", "")]),
+    ANNULER_SECTION,
+]
 
 
 async def _products(db: AsyncSession, business_id: UUID) -> list[Product]:
@@ -52,7 +65,30 @@ def _product_list_sections(products: list[Product]) -> list[tuple[str, list[tupl
         )
         for p in products
     ]
-    return [("Produits", rows)]
+    return [("Produits", rows), ANNULER_SECTION]
+
+
+async def _catalog_message(db: AsyncSession, business: Business) -> str:
+    products = await _products(db, business.id)
+    if not products:
+        return "Vous n'avez aucun produit dans votre catalogue."
+
+    groups: dict[str, list[Product]] = {}
+    for p in products:
+        groups.setdefault(p.category or "Sans catégorie", []).append(p)
+
+    lines = []
+    for category, items in groups.items():
+        lines.append(f"*{category}*")
+        for p in items:
+            avail = " (indisponible)" if not p.is_available else ""
+            if p.track_inventory:
+                stock_line = f"Stock actuel : {p.quantity_in_stock} / initial : {p.initial_stock}"
+            else:
+                stock_line = "Stock non suivi"
+            lines.append(f"- {p.name}{avail} — {int(p.price_xof)} FCFA — {stock_line}")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 async def _handle_order_command(db: AsyncSession, business: Business, text: str) -> str | None:
@@ -158,6 +194,9 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
 
     if intent == Intent.GOODBYE:
         return BotReply(text="À bientôt ! -- Jaaykat bi")
+
+    if intent == Intent.VOIR_CATALOGUE:
+        return with_merchant_menu(await _catalog_message(db, business))
 
     if intent == Intent.AJOUTER_PRODUIT:
         state.start_flow(conversation, ADD_PRODUCT_FLOW)
@@ -278,6 +317,7 @@ async def _continue_add_product(db: AsyncSession, business: Business, conversati
             price_xof=slots["price"],
             track_inventory=slots["track_inventory"],
             quantity_in_stock=slots["stock"],
+            initial_stock=slots["stock"],
         )
         db.add(product)
         state.clear_flow(conversation)
@@ -302,7 +342,11 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
             )
         slots["product_id"] = str(product.id)
         state.advance(conversation, 1, slots)
-        return BotReply(text=f"Que souhaitez-vous modifier pour {product.name} ?", buttons=_EDIT_FIELD_BUTTONS)
+        return BotReply(
+            text=f"Que souhaitez-vous modifier pour {product.name} ?",
+            list_button_text="Choisir",
+            list_sections=_EDIT_FIELD_SECTIONS,
+        )
 
     if step == 1:
         t = text.strip().lower()
@@ -313,7 +357,9 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
         elif t.startswith("3") or "disponib" in t:
             field = "availability"
         else:
-            return BotReply(text="Que souhaitez-vous modifier ?", buttons=_EDIT_FIELD_BUTTONS)
+            return BotReply(
+                text="Que souhaitez-vous modifier ?", list_button_text="Choisir", list_sections=_EDIT_FIELD_SECTIONS
+            )
         slots["field"] = field
         state.advance(conversation, 2, slots)
         if field == "availability":
@@ -339,6 +385,7 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
                 return with_cancel_button("Merci d'indiquer un nombre.")
             product.track_inventory = True
             product.quantity_in_stock = int(match.group())
+            product.initial_stock = product.quantity_in_stock  # a restock resets the baseline
             confirmation = f"Le stock de {product.name} est désormais {product.quantity_in_stock}."
         else:
             t = text.strip().lower()
@@ -414,12 +461,16 @@ async def _continue_promotion(db: AsyncSession, business: Business, conversation
             return with_cancel_button("Merci d'indiquer un pourcentage valide entre 1 et 99.")
         slots["discount_percent"] = int(match.group())
         state.advance(conversation, 2, slots)
-        return BotReply(text="Pendant combien de jours ?", buttons=_PROMO_DURATION_BUTTONS)
+        return BotReply(
+            text="Pendant combien de jours ?", list_button_text="Choisir", list_sections=_PROMO_DURATION_SECTIONS
+        )
 
     if step == 2:
         match = re.search(r"\d+", text)
         if not match or int(match.group()) <= 0:
-            return BotReply(text="Pendant combien de jours ?", buttons=_PROMO_DURATION_BUTTONS)
+            return BotReply(
+            text="Pendant combien de jours ?", list_button_text="Choisir", list_sections=_PROMO_DURATION_SECTIONS
+        )
         slots["duration_days"] = int(match.group())
         state.advance(conversation, 3, slots)
         product = await db.get(Product, UUID(slots["product_id"]))

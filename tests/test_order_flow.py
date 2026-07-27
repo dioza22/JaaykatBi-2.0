@@ -47,6 +47,7 @@ async def test_full_order_flow_creates_order_and_deducts_stock(db_session):
 
     reply = await handle_message(db_session, business, contact, conversation, "Je veux commander", is_merchant=False)
     assert any("Riz parfumé" in title for title in _row_titles(reply))
+    assert "Annuler" in _row_titles(reply)
 
     reply = await handle_message(db_session, business, contact, conversation, "1", is_merchant=False)
     assert "Combien d'unités" in reply.text
@@ -57,11 +58,11 @@ async def test_full_order_flow_creates_order_and_deducts_stock(db_session):
 
     reply = await handle_message(db_session, business, contact, conversation, "Amadou Fall", is_merchant=False)
     assert "livraison" in reply.text.lower()
-    assert set(_button_titles(reply)) == {"Retrait en boutique", "Livraison"}
+    assert set(_button_titles(reply)) == {"Retrait en boutique", "Livraison", "Annuler"}
 
     reply = await handle_message(db_session, business, contact, conversation, "retrait", is_merchant=False)
     assert "payer" in reply.text.lower()
-    assert set(_button_titles(reply)) == {"Wave", "Orange Money", "Cash à la livraison"}
+    assert set(_row_titles(reply)) == {"Wave", "Orange Money", "Cash à la livraison", "Annuler"}
 
     reply = await handle_message(db_session, business, contact, conversation, "3", is_merchant=False)  # Cash
     assert "Récapitulatif" in reply.text

@@ -20,10 +20,18 @@ class BotReply:
     # [(section_title, [(row_id, row_title, row_description)])]
 
 
+# Appended to every list-based prompt (product pickers, and any bounded
+# choice that's already at WhatsApp's 3-button cap) so there's always a
+# tappable way out, not just the typed "annuler" keyword.
+ANNULER_SECTION: tuple[str, list[tuple[str, str, str]]] = (
+    "Autre", [("annuler", "Annuler", "Annuler l'opération en cours")]
+)
+
 MERCHANT_MENU_SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
     (
         "Actions",
         [
+            ("voir_catalogue", "Voir le catalogue", "Voir tous les produits par catégorie"),
             ("ajouter_produit", "Ajouter un produit", "Ajouter un nouvel article au catalogue"),
             ("modifier_produit", "Modifier un produit", "Changer prix, stock ou disponibilité"),
             ("supprimer_produit", "Supprimer un produit", "Retirer un article du catalogue"),

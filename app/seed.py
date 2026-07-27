@@ -44,6 +44,7 @@ async def seed() -> None:
                 price_xof=4500,
                 track_inventory=True,
                 quantity_in_stock=50,
+                initial_stock=50,
                 low_stock_threshold=10,
             ),
             Product(
@@ -53,6 +54,7 @@ async def seed() -> None:
                 price_xof=2500,
                 track_inventory=True,
                 quantity_in_stock=30,
+                initial_stock=30,
                 low_stock_threshold=5,
             ),
             Product(
@@ -62,6 +64,7 @@ async def seed() -> None:
                 price_xof=800,
                 track_inventory=True,
                 quantity_in_stock=100,
+                initial_stock=100,
                 low_stock_threshold=20,
             ),
             Product(
@@ -71,6 +74,7 @@ async def seed() -> None:
                 price_xof=3200,
                 track_inventory=True,
                 quantity_in_stock=25,
+                initial_stock=25,
                 low_stock_threshold=5,
             ),
         ]

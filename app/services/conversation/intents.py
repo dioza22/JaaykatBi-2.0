@@ -45,6 +45,7 @@ _CUSTOMER_KEYWORDS: dict[Intent, list[str]] = {
 }
 
 _MERCHANT_KEYWORDS: dict[Intent, list[str]] = {
+    Intent.VOIR_CATALOGUE: ["voir le catalogue", "mon catalogue", "catalogue"],
     Intent.AJOUTER_PRODUIT: ["ajouter un produit", "ajouter produit", "nouveau produit"],
     Intent.MODIFIER_PRODUIT: ["modifier un produit", "modifier produit", "changer le prix"],
     Intent.SUPPRIMER_PRODUIT: ["supprimer un produit", "supprimer produit", "retirer un produit"],

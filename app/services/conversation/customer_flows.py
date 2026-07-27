@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Business, Contact, Conversation, DeliveryType, PaymentMethod, Product
 from app.services.conversation import state
 from app.services.conversation.product_lookup import resolve_product
-from app.services.conversation.reply import BotReply, with_cancel_button, with_customer_menu
+from app.services.conversation.reply import ANNULER_SECTION, BotReply, with_cancel_button, with_customer_menu
 from app.services.orders.service import InsufficientStockError, create_order, effective_price
 
 ORDER_FLOW = "commander_produit"
@@ -44,7 +44,7 @@ async def _format_catalog(db: AsyncSession, products: list[Product]) -> str:
 
 
 async def _product_list_sections(
-    db: AsyncSession, products: list[Product]
+    db: AsyncSession, products: list[Product], include_cancel: bool = False
 ) -> list[tuple[str, list[tuple[str, str, str]]]]:
     rows = []
     for product in products:
@@ -54,7 +54,10 @@ async def _product_list_sections(
         else:
             description = f"{int(price)} FCFA"
         rows.append((str(product.id), product.name, description))
-    return [("Produits", rows)]
+    sections = [("Produits", rows)]
+    if include_cancel:
+        sections.append(ANNULER_SECTION)
+    return sections
 
 
 async def catalog_message(db: AsyncSession, business: Business) -> BotReply:
@@ -100,8 +103,13 @@ def _resolve_payment_method(text: str) -> PaymentMethod | None:
     return None
 
 
-_PAYMENT_BUTTONS = [("wave", "Wave"), ("orange_money", "Orange Money"), ("cash", "Cash à la livraison")]
-_DELIVERY_TYPE_BUTTONS = [("pickup", "Retrait en boutique"), ("delivery", "Livraison")]
+# Payment method is a list, not buttons — 3 real options already fills
+# WhatsApp's button cap, leaving no room for a 4th "Annuler" button.
+_PAYMENT_SECTIONS = [
+    ("Paiement", [("wave", "Wave", ""), ("orange_money", "Orange Money", ""), ("cash", "Cash à la livraison", "")]),
+    ANNULER_SECTION,
+]
+_DELIVERY_TYPE_BUTTONS = [("pickup", "Retrait en boutique"), ("delivery", "Livraison"), ("annuler", "Annuler")]
 _CONFIRM_BUTTONS = [("confirm", "Confirmer"), ("cancel", "Annuler")]
 
 
@@ -110,7 +118,7 @@ async def start_order_flow(db: AsyncSession, business: Business, conversation: C
     if not products:
         return BotReply(text="Notre catalogue est momentanément indisponible pour passer commande. -- Jaaykat bi")
     state.start_flow(conversation, ORDER_FLOW)
-    sections = await _product_list_sections(db, products)
+    sections = await _product_list_sections(db, products, include_cancel=True)
     return BotReply(
         text="Très bien, passons commande. Quel produit souhaitez-vous ?",
         list_button_text="Choisir",
@@ -132,7 +140,7 @@ async def continue_order_flow(
     if step == 0:
         product = resolve_product(text, products)
         if product is None:
-            sections = await _product_list_sections(db, products)
+            sections = await _product_list_sections(db, products, include_cancel=True)
             return BotReply(
                 text="Je n'ai pas trouvé ce produit. Merci de choisir dans la liste :",
                 list_button_text="Choisir",
@@ -169,7 +177,9 @@ async def continue_order_flow(
             slots["delivery_type"] = DeliveryType.PICKUP.value
             slots["delivery_address"] = None
             state.advance(conversation, 5, slots)
-            return BotReply(text="Comment souhaitez-vous payer ?", buttons=_PAYMENT_BUTTONS)
+            return BotReply(
+                text="Comment souhaitez-vous payer ?", list_button_text="Choisir", list_sections=_PAYMENT_SECTIONS
+            )
         slots["delivery_type"] = DeliveryType.DELIVERY.value
         state.advance(conversation, 4, slots)
         return with_cancel_button("Quelle est votre adresse de livraison ?")
@@ -177,12 +187,18 @@ async def continue_order_flow(
     if step == 4:
         slots["delivery_address"] = text.strip()
         state.advance(conversation, 5, slots)
-        return BotReply(text="Comment souhaitez-vous payer ?", buttons=_PAYMENT_BUTTONS)
+        return BotReply(
+            text="Comment souhaitez-vous payer ?", list_button_text="Choisir", list_sections=_PAYMENT_SECTIONS
+        )
 
     if step == 5:
         payment_method = _resolve_payment_method(text)
         if payment_method is None:
-            return BotReply(text="Merci de choisir un mode de paiement.", buttons=_PAYMENT_BUTTONS)
+            return BotReply(
+                text="Merci de choisir un mode de paiement.",
+                list_button_text="Choisir",
+                list_sections=_PAYMENT_SECTIONS,
+            )
         slots["payment_method"] = payment_method.value
         state.advance(conversation, 6, slots)
         product = await db.get(Product, UUID(slots["product_id"]))

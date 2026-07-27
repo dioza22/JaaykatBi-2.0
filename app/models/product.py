@@ -21,6 +21,10 @@ class Product(Base):
 
     track_inventory: Mapped[bool] = mapped_column(Boolean, default=False)
     quantity_in_stock: Mapped[int | None] = mapped_column(Integer)
+    # Baseline set whenever the merchant explicitly sets a stock number (initial
+    # add, or a later restock) — never touched by order fulfillment, so
+    # quantity_in_stock/initial_stock reads as "X left of the Y last stocked."
+    initial_stock: Mapped[int | None] = mapped_column(Integer)
     low_stock_threshold: Mapped[int] = mapped_column(Integer, default=5)
 
     is_available: Mapped[bool] = mapped_column(Boolean, default=True)
