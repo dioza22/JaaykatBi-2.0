@@ -37,6 +37,7 @@ MERCHANT_MENU_SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ("supprimer_produit", "Supprimer un produit", "Retirer un article du catalogue"),
             ("mes_ventes", "Mes ventes", "Voir le résumé des ventes"),
             ("lancer_promotion", "Lancer une promotion", "Créer une réduction temporaire"),
+            ("arreter_promotion", "Arrêter une promotion", "Mettre fin à une promotion avant son échéance"),
             ("mes_commandes", "Mes commandes", "Voir les commandes en attente"),
             ("messages_en_attente", "Messages en attente", "Conversations en attente d'une réponse humaine"),
         ],

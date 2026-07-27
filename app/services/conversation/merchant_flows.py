@@ -26,6 +26,7 @@ ADD_PRODUCT_FLOW = "ajouter_produit"
 EDIT_PRODUCT_FLOW = "modifier_produit"
 DELETE_PRODUCT_FLOW = "supprimer_produit"
 PROMOTION_FLOW = "lancer_promotion"
+STOP_PROMOTION_FLOW = "arreter_promotion"
 
 _ORDER_COMMAND_RE = re.compile(r"^(CMD-\d{8}-\d{4})\s+(confirmer|livrer|annuler)$", re.IGNORECASE)
 
@@ -39,7 +40,10 @@ _YES_NO_BUTTONS = [("oui", "Oui"), ("non", "Non"), ("annuler", "Annuler")]
 # plus the shared "Autre"/Annuler section, same pattern as the product-picker
 # lists below.
 _EDIT_FIELD_SECTIONS = [
-    ("Que modifier ?", [("prix", "Prix", ""), ("stock", "Stock", ""), ("disponibilite", "Disponibilité", "")]),
+    (
+        "Que modifier ?",
+        [("nom", "Nom", ""), ("prix", "Prix", ""), ("stock", "Stock", ""), ("disponibilite", "Disponibilité", "")],
+    ),
     ANNULER_SECTION,
 ]
 _PROMO_DURATION_SECTIONS = [
@@ -109,6 +113,42 @@ def _resolve_category(text: str, categories: list[tuple[str, int]]) -> str | Non
     for name, _count in categories:
         if name.lower() in text_lower or text_lower in name.lower():
             return name
+    return None
+
+
+async def _active_promotions(db: AsyncSession, business_id: UUID) -> list[Promotion]:
+    promos = (
+        await db.execute(
+            select(Promotion).where(Promotion.business_id == business_id, Promotion.is_active == True)  # noqa: E712
+        )
+    ).scalars().all()
+    return [p for p in promos if p.is_currently_active()]
+
+
+async def _promotion_list_sections(
+    db: AsyncSession, promotions: list[Promotion]
+) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    rows = []
+    for promo in promotions:
+        product = await db.get(Product, promo.product_id)
+        name = product.name if product else "(produit supprimé)"
+        end_date = promo.end_date if promo.end_date.tzinfo else promo.end_date.replace(tzinfo=UTC)
+        days_left = max(0, (end_date - datetime.now(UTC)).days)
+        rows.append((str(promo.id), name, f"-{promo.discount_percent}% — {days_left}j restants"))
+    return [("Promotions en cours", rows), ANNULER_SECTION]
+
+
+def _resolve_active_promotion(text: str, promotions: list[Promotion], names: dict[str, str]) -> Promotion | None:
+    stripped = text.strip()
+    if stripped.isdigit():
+        idx = int(stripped)
+        if 1 <= idx <= len(promotions):
+            return promotions[idx - 1]
+    text_lower = stripped.lower()
+    for promo in promotions:
+        name = names.get(str(promo.product_id), "")
+        if name and (name.lower() in text_lower or text_lower in name.lower()):
+            return promo
     return None
 
 
@@ -285,6 +325,17 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
             list_sections=_PROMO_MODE_SECTIONS,
         )
 
+    if intent == Intent.ARRETER_PROMOTION:
+        promotions = await _active_promotions(db, business.id)
+        if not promotions:
+            return with_merchant_menu("Aucune promotion en cours actuellement.")
+        state.start_flow(conversation, STOP_PROMOTION_FLOW)
+        return BotReply(
+            text="Quelle promotion souhaitez-vous arrêter ?",
+            list_button_text="Choisir",
+            list_sections=await _promotion_list_sections(db, promotions),
+        )
+
     if intent == Intent.CONSULTER_VENTES:
         return with_merchant_menu(await _sales_summary(db, business))
 
@@ -307,6 +358,8 @@ async def continue_flow(db: AsyncSession, business: Business, conversation: Conv
         return await _continue_delete_product(db, conversation, text)
     if flow == PROMOTION_FLOW:
         return await _continue_promotion(db, business, conversation, text)
+    if flow == STOP_PROMOTION_FLOW:
+        return await _continue_stop_promotion(db, business, conversation, text)
 
     state.clear_flow(conversation)
     return with_merchant_menu("Que souhaitez-vous faire ?")
@@ -400,11 +453,13 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
 
     if step == 1:
         t = text.strip().lower()
-        if t.startswith("1") or "prix" in t:
+        if t.startswith("1") or "nom" in t:
+            field = "name"
+        elif t.startswith("2") or "prix" in t:
             field = "price"
-        elif t.startswith("2") or "stock" in t:
+        elif t.startswith("3") or "stock" in t:
             field = "stock"
-        elif t.startswith("3") or "disponib" in t:
+        elif t.startswith("4") or "disponib" in t:
             field = "availability"
         else:
             return BotReply(
@@ -414,13 +469,24 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
         state.advance(conversation, 2, slots)
         if field == "availability":
             return BotReply(text="Le produit doit-il être disponible ?", buttons=_YES_NO_BUTTONS)
-        prompts = {"price": "Quel est le nouveau prix en FCFA ?", "stock": "Quel est le nouveau stock ?"}
+        prompts = {
+            "name": "Quel est le nouveau nom du produit ?",
+            "price": "Quel est le nouveau prix en FCFA ?",
+            "stock": "Quel est le nouveau stock ?",
+        }
         return with_cancel_button(prompts[field])
 
     if step == 2:
         product = await db.get(Product, UUID(slots["product_id"]))
         field = slots["field"]
-        if field == "price":
+        if field == "name":
+            new_name = text.strip()
+            if not new_name:
+                return with_cancel_button("Merci d'indiquer un nom valide.")
+            old_name = product.name
+            product.name = new_name
+            confirmation = f"{old_name} a été renommé en {new_name}."
+        elif field == "price":
             try:
                 price = float(re.sub(r"[^\d.]", "", text))
                 if price <= 0:
@@ -644,6 +710,47 @@ async def _continue_promotion(db: AsyncSession, business: Business, conversation
         count = len(product_ids)
         label = "produit" if count == 1 else "produits"
         return with_merchant_menu(f"Promotion activée sur {count} {label}. -- Jaaykat bi")
+
+    state.clear_flow(conversation)
+    return with_merchant_menu("Que souhaitez-vous faire ?")
+
+
+async def _continue_stop_promotion(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
+    step = state.current_step(conversation)
+    slots = state.current_slots(conversation)
+    promotions = await _active_promotions(db, business.id)
+
+    if step == 0:
+        names = {}
+        for promo in promotions:
+            product = await db.get(Product, promo.product_id)
+            names[str(promo.product_id)] = product.name if product else ""
+        promo = _resolve_active_promotion(text, promotions, names)
+        if promo is None:
+            return BotReply(
+                text="Promotion introuvable. Choisissez dans la liste :",
+                list_button_text="Choisir",
+                list_sections=await _promotion_list_sections(db, promotions),
+            )
+        slots["promotion_id"] = str(promo.id)
+        state.advance(conversation, 1, slots)
+        product = await db.get(Product, promo.product_id)
+        name = product.name if product else "ce produit"
+        return BotReply(text=f"Confirmez-vous l'arrêt de la promotion sur {name} ?", buttons=_YES_NO_BUTTONS)
+
+    if step == 1:
+        t = text.strip().lower()
+        if t not in {"oui", "non"}:
+            return BotReply(text="Confirmez-vous l'arrêt de cette promotion ?", buttons=_YES_NO_BUTTONS)
+        promo = await db.get(Promotion, UUID(slots["promotion_id"]))
+        if t == "oui" and promo is not None:
+            promo.is_active = False
+            product = await db.get(Product, promo.product_id)
+            name = product.name if product else "ce produit"
+            state.clear_flow(conversation)
+            return with_merchant_menu(f"Promotion arrêtée sur {name}. -- Jaaykat bi")
+        state.clear_flow(conversation)
+        return with_merchant_menu("D'accord, la promotion continue.")
 
     state.clear_flow(conversation)
     return with_merchant_menu("Que souhaitez-vous faire ?")

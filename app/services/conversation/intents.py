@@ -19,6 +19,7 @@ class Intent(str, enum.Enum):
     SUPPRIMER_PRODUIT = "supprimer_produit"
     CONSULTER_VENTES = "consulter_ventes"
     LANCER_PROMOTION = "lancer_promotion"
+    ARRETER_PROMOTION = "arreter_promotion"
     VOIR_COMMANDES = "voir_commandes"
     MESSAGES_EN_ATTENTE = "messages_en_attente"
     UNKNOWN = "unknown"
@@ -51,6 +52,7 @@ _MERCHANT_KEYWORDS: dict[Intent, list[str]] = {
     Intent.SUPPRIMER_PRODUIT: ["supprimer un produit", "supprimer produit", "retirer un produit"],
     Intent.CONSULTER_VENTES: ["mes ventes", "voir mes ventes", "statistiques", "chiffre d'affaires"],
     Intent.LANCER_PROMOTION: ["lancer une promotion", "lancer promotion", "créer une promotion"],
+    Intent.ARRETER_PROMOTION: ["arrêter une promotion", "arreter une promotion", "terminer une promotion", "stopper une promotion"],
     Intent.VOIR_COMMANDES: ["mes commandes", "commandes en attente", "voir les commandes"],
     Intent.MESSAGES_EN_ATTENTE: ["messages en attente", "conversations en attente"],
 }

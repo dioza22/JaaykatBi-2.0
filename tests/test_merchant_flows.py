@@ -83,7 +83,7 @@ async def test_add_product_flow_creates_product(db_session):
 
     reply = await _merchant_says(db_session, business, contact, conversation, "confirmer")
     assert "ajouté au catalogue" in reply.text
-    assert len(_row_titles(reply)) == 8  # merchant menu re-attached
+    assert len(_row_titles(reply)) == 9  # merchant menu re-attached
 
     product = await db_session.scalar(select(Product).where(Product.name == "Huile d'arachide 1L"))
     assert product is not None
@@ -101,9 +101,9 @@ async def test_edit_product_price_flow(db_session):
 
     reply = await _merchant_says(db_session, business, contact, conversation, "1")
     assert "modifier" in reply.text.lower()
-    assert set(_row_titles(reply)) == {"Prix", "Stock", "Disponibilité", "Annuler"}
+    assert set(_row_titles(reply)) == {"Nom", "Prix", "Stock", "Disponibilité", "Annuler"}
 
-    reply = await _merchant_says(db_session, business, contact, conversation, "1")  # choose "Prix"
+    reply = await _merchant_says(db_session, business, contact, conversation, "Prix")
     assert "nouveau prix" in reply.text.lower()
 
     reply = await _merchant_says(db_session, business, contact, conversation, "5000")
@@ -112,6 +112,25 @@ async def test_edit_product_price_flow(db_session):
     await db_session.flush()
     await db_session.refresh(product)
     assert float(product.price_xof) == 5000.0
+    assert conversation.state["flow"] is None
+
+
+async def test_edit_product_name_field(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+
+    await _merchant_says(db_session, business, contact, conversation, "modifier un produit")
+    reply = await _merchant_says(db_session, business, contact, conversation, "1")
+    assert "Nom" in _row_titles(reply)
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Nom")
+    assert "nouveau nom" in reply.text.lower()
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Riz parfumé 10 kg")
+    assert "renommé" in reply.text
+
+    await db_session.flush()
+    await db_session.refresh(product)
+    assert product.name == "Riz parfumé 10 kg"
     assert conversation.state["flow"] is None
 
 
@@ -262,6 +281,45 @@ async def test_catalog_view_shows_promo_tag_and_updated_price(db_session):
     assert promo.duration_days == 7
 
 
+async def test_stop_promotion_flow_ends_it_before_its_due_date(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    db_session.add(
+        Promotion(
+            business_id=business.id, product_id=product.id, title="Promo -10%",
+            discount_percent=10, duration_days=7, end_date=datetime.now(UTC) + timedelta(days=7),
+        )
+    )
+    await db_session.flush()
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Arrêter une promotion")
+    assert product.name in _row_titles(reply)
+
+    reply = await _merchant_says(db_session, business, contact, conversation, product.name)
+    assert set(_button_titles(reply)) == {"Oui", "Non", "Annuler"}
+    assert product.name in reply.text
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "oui")
+    assert "arrêtée" in reply.text.lower()
+    assert conversation.state["flow"] is None
+
+    await db_session.flush()
+    promo = await db_session.scalar(select(Promotion).where(Promotion.product_id == product.id))
+    assert promo.is_active is False
+
+    # catalog view no longer shows the promo tag for this product
+    reply = await _merchant_says(db_session, business, contact, conversation, "voir le catalogue")
+    assert "PROMO" not in reply.text
+    assert "4500 FCFA" in reply.text
+
+
+async def test_stop_promotion_flow_reports_none_active(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Arrêter une promotion")
+    assert "Aucune promotion en cours" in reply.text
+    assert conversation.state.get("flow") is None  # no flow started — nothing to pick from
+
+
 async def test_merchant_flow_can_be_cancelled_mid_flow(db_session):
     business, product, contact, conversation = await _setup(db_session)
 
@@ -269,7 +327,7 @@ async def test_merchant_flow_can_be_cancelled_mid_flow(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, "annuler")
     assert "annulé" in reply.text.lower()
     assert conversation.state["flow"] is None
-    assert len(_row_titles(reply)) == 8  # merchant menu re-attached
+    assert len(_row_titles(reply)) == 9  # merchant menu re-attached
 
 
 async def test_sales_summary_single_turn(db_session):
@@ -286,7 +344,7 @@ async def test_sales_summary_single_turn(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, "mes ventes")
     assert "Aujourd'hui" in reply.text
     assert "4500" in reply.text
-    assert len(_row_titles(reply)) == 8  # menu re-attached after single-turn command
+    assert len(_row_titles(reply)) == 9  # menu re-attached after single-turn command
 
 
 async def test_pending_orders_and_order_commands(db_session):
@@ -336,7 +394,7 @@ async def test_catalog_view_groups_by_category_with_stock_numbers(db_session):
     assert "Stock actuel : 10 / initial : 20" in reply.text
     assert "Savon karité" in reply.text
     assert "Stock non suivi" in reply.text
-    assert len(_row_titles(reply)) == 8  # menu re-attached
+    assert len(_row_titles(reply)) == 9  # menu re-attached
 
 
 async def test_messages_en_attente_lists_flagged_conversations(db_session):
