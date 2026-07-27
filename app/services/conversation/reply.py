@@ -1,0 +1,57 @@
+"""What the conversation engine hands back to the webhook layer for sending.
+A `BotReply` carries plain text plus, optionally, WhatsApp interactive
+elements (buttons for <=3 choices, a list for more) — the message_handler
+picks the right WhatsAppClient call based on which fields are set.
+
+Button/list titles double as the text the routing logic matches on (a tap
+delivers the tapped title back as the inbound message text, same as if the
+user had typed it) — see intents.py / customer_flows.py / merchant_flows.py
+for the keyword matches each title below is chosen to hit."""
+
+from dataclasses import dataclass
+
+
+@dataclass
+class BotReply:
+    text: str
+    buttons: list[tuple[str, str]] | None = None  # [(id, title)], max 3
+    list_button_text: str | None = None
+    list_sections: list[tuple[str, list[tuple[str, str, str]]]] | None = None
+    # [(section_title, [(row_id, row_title, row_description)])]
+
+
+MERCHANT_MENU_SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
+    (
+        "Actions",
+        [
+            ("ajouter_produit", "Ajouter un produit", "Ajouter un nouvel article au catalogue"),
+            ("modifier_produit", "Modifier un produit", "Changer prix, stock ou disponibilité"),
+            ("supprimer_produit", "Supprimer un produit", "Retirer un article du catalogue"),
+            ("mes_ventes", "Mes ventes", "Voir le résumé des ventes"),
+            ("lancer_promotion", "Lancer une promotion", "Créer une réduction temporaire"),
+            ("mes_commandes", "Mes commandes", "Voir les commandes en attente"),
+            ("messages_en_attente", "Messages en attente", "Conversations en attente d'une réponse humaine"),
+        ],
+    )
+]
+
+
+def with_merchant_menu(text: str) -> BotReply:
+    return BotReply(text=text, list_button_text="Menu", list_sections=MERCHANT_MENU_SECTIONS)
+
+
+def with_customer_menu(text: str) -> BotReply:
+    return BotReply(
+        text=text,
+        buttons=[
+            ("voir_catalogue", "Voir catalogue"),
+            ("voir_promotions", "Promotions"),
+            ("commander_produit", "Commander"),
+        ],
+    )
+
+
+def with_cancel_button(text: str) -> BotReply:
+    """For free-text prompts mid-flow: a lone escape-hatch button alongside
+    the text prompt, so leaving doesn't require remembering to type 'annuler'."""
+    return BotReply(text=text, buttons=[("annuler", "Annuler")])

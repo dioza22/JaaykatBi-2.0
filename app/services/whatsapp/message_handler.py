@@ -161,16 +161,23 @@ async def _handle_inbound(db: AsyncSession, whatsapp_client: WhatsAppClient, inb
     is_merchant = inbound.wa_id == business.owner_whatsapp_number
     reply = await handle_message(db, business, contact, conversation, inbound.text, is_merchant=is_merchant)
 
-    if reply:
+    if reply and reply.text:
         db.add(
             Message(
                 conversation_id=conversation.id,
                 direction=MessageDirection.OUTBOUND,
-                content=reply,
+                content=reply.text,
                 was_ai_generated=False,
             )
         )
         try:
-            await whatsapp_client.send_text(contact.wa_id, reply)
+            if reply.list_sections:
+                await whatsapp_client.send_list(
+                    contact.wa_id, reply.text, reply.list_button_text or "Menu", reply.list_sections
+                )
+            elif reply.buttons:
+                await whatsapp_client.send_buttons(contact.wa_id, reply.text, reply.buttons)
+            else:
+                await whatsapp_client.send_text(contact.wa_id, reply.text)
         except Exception:
-            logger.warning("send_text failed for conversation %s", conversation.id, exc_info=True)
+            logger.warning("sending reply failed for conversation %s", conversation.id, exc_info=True)

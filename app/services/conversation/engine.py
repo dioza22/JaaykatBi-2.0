@@ -8,13 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Business, Contact, Conversation, MessageDirection
 from app.models import Message as MessageModel
+from app.models import Order, OrderStatus
 from app.services.ai.llm_client import LLMClient
 from app.services.ai.prompts import build_system_prompt
 from app.services.conversation import customer_flows, merchant_flows, state
 from app.services.conversation.intents import Intent, detect_intent
+from app.services.conversation.reply import BotReply, with_customer_menu, with_merchant_menu
 from app.services.faq.service import match_faq
 from app.services.orders.service import cancel_order
-from app.models import Order, OrderStatus
 
 _UNKNOWN_STREAK_BEFORE_HANDOFF = 3
 
@@ -74,7 +75,7 @@ async def _customer_cancel_order(db: AsyncSession, business: Business, contact: 
     return f"Votre commande {order.order_number} a été annulée. -- Jaaykat bi"
 
 
-async def _handoff_message(business: Business) -> str:
+def _handoff_message(business: Business) -> str:
     return (
         f"Je transmets votre message à {business.owner_name or 'notre équipe'}, qui vous répondra bientôt. "
         "Merci de votre patience. -- Jaaykat bi"
@@ -88,14 +89,16 @@ async def handle_message(
     conversation: Conversation,
     text: str,
     is_merchant: bool,
-) -> str:
+) -> BotReply:
     active_flow = state.current_flow(conversation)
 
     # A flow-wide "cancel" escape hatch, checked before delegating to whichever
-    # flow (customer or merchant) is currently in progress.
+    # flow (customer or merchant) is currently in progress. Catches both the
+    # typed keyword and a tap on the "Annuler" button attached to free-text steps.
     if active_flow and text.strip().lower() in {"annuler", "annuler commande", "stop"}:
         state.clear_flow(conversation)
-        return "D'accord, j'ai annulé l'opération en cours. -- Jaaykat bi"
+        text_out = "D'accord, j'ai annulé l'opération en cours. -- Jaaykat bi"
+        return with_merchant_menu(text_out) if is_merchant else with_customer_menu(text_out)
 
     if active_flow:
         if is_merchant:
@@ -109,11 +112,11 @@ async def handle_message(
 
     if intent == Intent.GREETING:
         state.reset_unknown_streak(conversation)
-        return business.welcome_message or "Bonjour ! Comment puis-je vous aider ? -- Jaaykat bi"
+        return with_customer_menu(business.welcome_message or "Bonjour ! Comment puis-je vous aider ?")
 
     if intent == Intent.GOODBYE:
         state.reset_unknown_streak(conversation)
-        return "Merci pour votre visite. Au plaisir de vous revoir bientôt. -- Jaaykat bi"
+        return BotReply(text="Merci pour votre visite. Au plaisir de vous revoir bientôt. -- Jaaykat bi")
 
     if intent == Intent.VOIR_CATALOGUE:
         state.reset_unknown_streak(conversation)
@@ -129,34 +132,35 @@ async def handle_message(
 
     if intent == Intent.STATUT_COMMANDE:
         state.reset_unknown_streak(conversation)
-        return await _customer_order_status(db, business, contact)
+        return with_customer_menu(await _customer_order_status(db, business, contact))
 
     if intent == Intent.ANNULER_COMMANDE:
         state.reset_unknown_streak(conversation)
-        return await _customer_cancel_order(db, business, contact)
+        return with_customer_menu(await _customer_cancel_order(db, business, contact))
 
     if intent == Intent.PARLER_A_QUELQUUN:
         state.set_needs_human(conversation, True)
-        return await _handoff_message(business)
+        return BotReply(text=_handoff_message(business))
 
     # UNKNOWN: try an FAQ match first (cheap, no LLM call), then fall back to
-    # the LLM for open-ended catalog Q&A / general chat.
+    # the LLM for open-ended catalog Q&A / general chat. Left as plain text
+    # (no menu attached) so casual conversation doesn't feel like a form.
     faq = await match_faq(db, business.id, text)
     if faq:
         state.reset_unknown_streak(conversation)
-        return faq.answer
+        return BotReply(text=faq.answer)
 
     products = await customer_flows.available_products(db, business.id)
     system_prompt = build_system_prompt(business, products)
     history = await _message_history(db, conversation.id)
-    reply = await _llm_client.generate(system_prompt, history, text)
+    reply_text = await _llm_client.generate(system_prompt, history, text)
 
-    if reply is None:
+    if reply_text is None:
         streak = state.increment_unknown_streak(conversation)
         if streak >= _UNKNOWN_STREAK_BEFORE_HANDOFF:
             state.set_needs_human(conversation, True)
-            return await _handoff_message(business)
-        return "Je n'ai pas bien compris. Pourriez-vous reformuler, ou répondre 'catalogue' pour voir nos produits ?"
+            return BotReply(text=_handoff_message(business))
+        return BotReply(text="Je n'ai pas bien compris. Pourriez-vous reformuler, ou répondre 'catalogue' pour voir nos produits ?")
 
     state.reset_unknown_streak(conversation)
-    return reply
+    return BotReply(text=reply_text)

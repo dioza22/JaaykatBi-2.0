@@ -53,26 +53,37 @@ async def _merchant_says(db_session, business, contact, conversation, text):
     return await handle_message(db_session, business, contact, conversation, text, is_merchant=True)
 
 
+def _row_titles(reply):
+    return [row[1] for section in reply.list_sections for row in section[1]]
+
+
+def _button_titles(reply):
+    return [title for _id, title in reply.buttons]
+
+
 async def test_add_product_flow_creates_product(db_session):
     business, _, contact, conversation = await _setup(db_session)
 
     reply = await _merchant_says(db_session, business, contact, conversation, "ajouter un produit")
-    assert "nom" in reply.lower()
+    assert "nom" in reply.text.lower()
+    assert "Annuler" in _button_titles(reply)
 
     reply = await _merchant_says(db_session, business, contact, conversation, "Huile d'arachide 1L")
-    assert "catégorie" in reply.lower()
+    assert "catégorie" in reply.text.lower()
 
     reply = await _merchant_says(db_session, business, contact, conversation, "-")
-    assert "prix" in reply.lower()
+    assert "prix" in reply.text.lower()
 
     reply = await _merchant_says(db_session, business, contact, conversation, "2500")
-    assert "stock" in reply.lower()
+    assert "stock" in reply.text.lower()
 
     reply = await _merchant_says(db_session, business, contact, conversation, "30")
-    assert "Récapitulatif" in reply
+    assert "Récapitulatif" in reply.text
+    assert set(_button_titles(reply)) == {"Confirmer", "Annuler"}
 
     reply = await _merchant_says(db_session, business, contact, conversation, "confirmer")
-    assert "ajouté au catalogue" in reply
+    assert "ajouté au catalogue" in reply.text
+    assert len(_row_titles(reply)) == 7  # merchant menu re-attached
 
     product = await db_session.scalar(select(Product).where(Product.name == "Huile d'arachide 1L"))
     assert product is not None
@@ -84,15 +95,18 @@ async def test_add_product_flow_creates_product(db_session):
 async def test_edit_product_price_flow(db_session):
     business, product, contact, conversation = await _setup(db_session)
 
-    await _merchant_says(db_session, business, contact, conversation, "modifier un produit")
+    reply = await _merchant_says(db_session, business, contact, conversation, "modifier un produit")
+    assert product.name in _row_titles(reply)
+
     reply = await _merchant_says(db_session, business, contact, conversation, "1")
-    assert "modifier" in reply.lower()
+    assert "modifier" in reply.text.lower()
+    assert set(_button_titles(reply)) == {"Prix", "Stock", "Disponibilité"}
 
     reply = await _merchant_says(db_session, business, contact, conversation, "1")  # choose "Prix"
-    assert "nouveau prix" in reply.lower()
+    assert "nouveau prix" in reply.text.lower()
 
     reply = await _merchant_says(db_session, business, contact, conversation, "5000")
-    assert "désormais 5000" in reply
+    assert "désormais 5000" in reply.text
 
     await db_session.flush()
     await db_session.refresh(product)
@@ -105,10 +119,11 @@ async def test_delete_product_flow_deactivates_instead_of_hard_delete(db_session
 
     await _merchant_says(db_session, business, contact, conversation, "supprimer un produit")
     reply = await _merchant_says(db_session, business, contact, conversation, "1")
-    assert "confirmez-vous" in reply.lower()
+    assert "confirmez-vous" in reply.text.lower()
+    assert set(_button_titles(reply)) == {"Oui", "Non"}
 
     reply = await _merchant_says(db_session, business, contact, conversation, "oui")
-    assert "retiré du catalogue" in reply
+    assert "retiré du catalogue" in reply.text
 
     await db_session.flush()
     await db_session.refresh(product)
@@ -123,12 +138,14 @@ async def test_launch_promotion_flow_creates_promotion(db_session):
 
     await _merchant_says(db_session, business, contact, conversation, "lancer une promotion")
     await _merchant_says(db_session, business, contact, conversation, "1")
-    await _merchant_says(db_session, business, contact, conversation, "10")
+    reply = await _merchant_says(db_session, business, contact, conversation, "10")
+    assert set(_button_titles(reply)) == {"3 jours", "7 jours", "14 jours"}
+
     reply = await _merchant_says(db_session, business, contact, conversation, "7")
-    assert "confirmer" in reply.lower()
+    assert set(_button_titles(reply)) == {"Confirmer", "Annuler"}
 
     reply = await _merchant_says(db_session, business, contact, conversation, "confirmer")
-    assert "Promotion activée" in reply
+    assert "Promotion activée" in reply.text
 
     promo = await db_session.scalar(select(Promotion).where(Promotion.product_id == product.id))
     assert promo is not None
@@ -141,8 +158,9 @@ async def test_merchant_flow_can_be_cancelled_mid_flow(db_session):
 
     await _merchant_says(db_session, business, contact, conversation, "ajouter un produit")
     reply = await _merchant_says(db_session, business, contact, conversation, "annuler")
-    assert "annulé" in reply.lower()
+    assert "annulé" in reply.text.lower()
     assert conversation.state["flow"] is None
+    assert len(_row_titles(reply)) == 7  # merchant menu re-attached
 
 
 async def test_sales_summary_single_turn(db_session):
@@ -157,8 +175,9 @@ async def test_sales_summary_single_turn(db_session):
     )
 
     reply = await _merchant_says(db_session, business, contact, conversation, "mes ventes")
-    assert "Aujourd'hui" in reply
-    assert "4500" in reply
+    assert "Aujourd'hui" in reply.text
+    assert "4500" in reply.text
+    assert len(_row_titles(reply)) == 7  # menu re-attached after single-turn command
 
 
 async def test_pending_orders_and_order_commands(db_session):
@@ -173,16 +192,16 @@ async def test_pending_orders_and_order_commands(db_session):
     )
 
     reply = await _merchant_says(db_session, business, contact, conversation, "mes commandes")
-    assert order.order_number in reply
+    assert order.order_number in reply.text
 
     reply = await _merchant_says(db_session, business, contact, conversation, f"{order.order_number} confirmer")
-    assert "confirmée" in reply
+    assert "confirmée" in reply.text
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.CONFIRMED
 
     reply = await _merchant_says(db_session, business, contact, conversation, f"{order.order_number} livrer")
-    assert "livrée" in reply
+    assert "livrée" in reply.text
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.FULFILLED
@@ -203,5 +222,5 @@ async def test_messages_en_attente_lists_flagged_conversations(db_session):
     await db_session.flush()
 
     reply = await _merchant_says(db_session, business, contact, conversation, "messages en attente")
-    assert "Client Perdu" in reply
-    assert "221770009999" in reply
+    assert "Client Perdu" in reply.text
+    assert "221770009999" in reply.text

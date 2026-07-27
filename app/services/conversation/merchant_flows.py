@@ -2,7 +2,11 @@
 — no dashboard). Frequent one-off actions (checking sales, listing/updating
 orders) are single-turn commands; actions that need several pieces of
 information (adding a product, launching a promotion) are short FSM flows
-using the same Conversation.state machinery as the customer order flow."""
+using the same Conversation.state machinery as the customer order flow.
+
+Every completed/cancelled flow and every single-turn command result is
+wrapped in `with_merchant_menu()` so the merchant always sees the way back
+to the main menu instead of having to remember what to type next."""
 
 import re
 from datetime import UTC, date, datetime, timedelta
@@ -11,10 +15,11 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Business, Conversation, Contact, Order, OrderStatus, Product, Promotion
+from app.models import Business, Contact, Conversation, Order, OrderStatus, Product, Promotion
 from app.services.conversation import state
 from app.services.conversation.intents import Intent, detect_intent
 from app.services.conversation.product_lookup import resolve_product
+from app.services.conversation.reply import BotReply, with_cancel_button, with_merchant_menu
 from app.services.orders.service import cancel_order, confirm_order, fulfill_order
 
 ADD_PRODUCT_FLOW = "ajouter_produit"
@@ -24,16 +29,10 @@ PROMOTION_FLOW = "lancer_promotion"
 
 _ORDER_COMMAND_RE = re.compile(r"^(CMD-\d{8}-\d{4})\s+(confirmer|livrer|annuler)$", re.IGNORECASE)
 
-_MENU = (
-    "Que souhaitez-vous faire ?\n"
-    "- 'ajouter un produit'\n"
-    "- 'modifier un produit'\n"
-    "- 'supprimer un produit'\n"
-    "- 'mes ventes'\n"
-    "- 'lancer une promotion'\n"
-    "- 'mes commandes'\n"
-    "- 'messages en attente'"
-)
+_CONFIRM_BUTTONS = [("confirm", "Confirmer"), ("cancel", "Annuler")]
+_YES_NO_BUTTONS = [("oui", "Oui"), ("non", "Non")]
+_EDIT_FIELD_BUTTONS = [("prix", "Prix"), ("stock", "Stock"), ("disponibilite", "Disponibilité")]
+_PROMO_DURATION_BUTTONS = [("3", "3 jours"), ("7", "7 jours"), ("14", "14 jours")]
 
 
 async def _products(db: AsyncSession, business_id: UUID) -> list[Product]:
@@ -44,12 +43,16 @@ async def _products(db: AsyncSession, business_id: UUID) -> list[Product]:
     ).scalars().all()
 
 
-def _format_product_list(products: list[Product]) -> str:
-    return "\n".join(
-        f"{i}. {p.name} — {int(p.price_xof)} FCFA"
-        f"{' (indisponible)' if not p.is_available else ''}"
-        for i, p in enumerate(products, start=1)
-    )
+def _product_list_sections(products: list[Product]) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    rows = [
+        (
+            str(p.id),
+            p.name,
+            f"{int(p.price_xof)} FCFA" + (" (indisponible)" if not p.is_available else ""),
+        )
+        for p in products
+    ]
+    return [("Produits", rows)]
 
 
 async def _handle_order_command(db: AsyncSession, business: Business, text: str) -> str | None:
@@ -143,57 +146,69 @@ async def _pending_human_handoffs(db: AsyncSession, business: Business) -> str:
     return "Messages en attente d'une réponse humaine :\n" + "\n".join(lines)
 
 
-async def handle_intent(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> str:
+async def handle_intent(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
     order_command_reply = await _handle_order_command(db, business, text)
     if order_command_reply is not None:
-        return order_command_reply
+        return with_merchant_menu(order_command_reply)
 
     intent = detect_intent(text, is_merchant=True)
 
     if intent == Intent.GREETING:
-        return f"Bonjour {business.owner_name or ''} !\n{_MENU}".strip()
+        return with_merchant_menu(f"Bonjour {business.owner_name or ''} ! Que souhaitez-vous faire ?".strip())
 
     if intent == Intent.GOODBYE:
-        return "À bientôt ! -- Jaaykat bi"
+        return BotReply(text="À bientôt ! -- Jaaykat bi")
 
     if intent == Intent.AJOUTER_PRODUIT:
         state.start_flow(conversation, ADD_PRODUCT_FLOW)
-        return "Quel est le nom du nouveau produit ?"
+        return with_cancel_button("Quel est le nom du nouveau produit ?")
 
     if intent == Intent.MODIFIER_PRODUIT:
         products = await _products(db, business.id)
         if not products:
-            return "Vous n'avez aucun produit à modifier."
+            return with_merchant_menu("Vous n'avez aucun produit à modifier.")
         state.start_flow(conversation, EDIT_PRODUCT_FLOW)
-        return f"Quel produit souhaitez-vous modifier ?\n{_format_product_list(products)}"
+        return BotReply(
+            text="Quel produit souhaitez-vous modifier ?",
+            list_button_text="Choisir",
+            list_sections=_product_list_sections(products),
+        )
 
     if intent == Intent.SUPPRIMER_PRODUIT:
         products = await _products(db, business.id)
         if not products:
-            return "Vous n'avez aucun produit à retirer."
+            return with_merchant_menu("Vous n'avez aucun produit à retirer.")
         state.start_flow(conversation, DELETE_PRODUCT_FLOW)
-        return f"Quel produit souhaitez-vous retirer du catalogue ?\n{_format_product_list(products)}"
+        return BotReply(
+            text="Quel produit souhaitez-vous retirer du catalogue ?",
+            list_button_text="Choisir",
+            list_sections=_product_list_sections(products),
+        )
 
     if intent == Intent.LANCER_PROMOTION:
         products = await _products(db, business.id)
         if not products:
-            return "Vous n'avez aucun produit pour lancer une promotion."
+            return with_merchant_menu("Vous n'avez aucun produit pour lancer une promotion.")
         state.start_flow(conversation, PROMOTION_FLOW)
-        return f"Quel produit souhaitez-vous mettre en promotion ?\n{_format_product_list(products)}"
+        return BotReply(
+            text="Quel produit souhaitez-vous mettre en promotion ?",
+            list_button_text="Choisir",
+            list_sections=_product_list_sections(products),
+        )
 
     if intent == Intent.CONSULTER_VENTES:
-        return await _sales_summary(db, business)
+        return with_merchant_menu(await _sales_summary(db, business))
 
     if intent == Intent.VOIR_COMMANDES:
-        return await _pending_orders_message(db, business)
+        return with_merchant_menu(await _pending_orders_message(db, business))
 
     if intent == Intent.MESSAGES_EN_ATTENTE:
-        return await _pending_human_handoffs(db, business)
+        return with_merchant_menu(await _pending_human_handoffs(db, business))
 
-    return _MENU
+    return with_merchant_menu("Je n'ai pas compris. Que souhaitez-vous faire ?")
 
 
-async def continue_flow(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> str:
+async def continue_flow(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
     flow = state.current_flow(conversation)
     if flow == ADD_PRODUCT_FLOW:
         return await _continue_add_product(db, business, conversation, text)
@@ -205,26 +220,26 @@ async def continue_flow(db: AsyncSession, business: Business, conversation: Conv
         return await _continue_promotion(db, business, conversation, text)
 
     state.clear_flow(conversation)
-    return _MENU
+    return with_merchant_menu("Que souhaitez-vous faire ?")
 
 
-async def _continue_add_product(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> str:
+async def _continue_add_product(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
     step = state.current_step(conversation)
     slots = state.current_slots(conversation)
 
     if step == 0:
         name = text.strip()
         if not name:
-            return "Merci d'indiquer un nom de produit."
+            return with_cancel_button("Merci d'indiquer un nom de produit.")
         slots["name"] = name
         state.advance(conversation, 1, slots)
-        return "Quelle catégorie ? (ou répondez '-' si aucune)"
+        return with_cancel_button("Quelle catégorie ? (ou répondez '-' si aucune)")
 
     if step == 1:
         category = text.strip()
         slots["category"] = None if category == "-" else category
         state.advance(conversation, 2, slots)
-        return "Quel est le prix en FCFA ?"
+        return with_cancel_button("Quel est le prix en FCFA ?")
 
     if step == 2:
         try:
@@ -232,10 +247,10 @@ async def _continue_add_product(db: AsyncSession, business: Business, conversati
             if price <= 0:
                 raise ValueError
         except ValueError:
-            return "Merci d'indiquer un prix valide (ex : 4500)."
+            return with_cancel_button("Merci d'indiquer un prix valide (ex : 4500).")
         slots["price"] = price
         state.advance(conversation, 3, slots)
-        return "Quel est le stock initial ? (un nombre, ou 'illimité' si vous ne suivez pas le stock)"
+        return with_cancel_button("Quel est le stock initial ? (un nombre, ou 'illimité' si vous ne suivez pas le stock)")
 
     if step == 3:
         t = text.strip().lower()
@@ -245,19 +260,17 @@ async def _continue_add_product(db: AsyncSession, business: Business, conversati
         else:
             match = re.search(r"\d+", text)
             if not match:
-                return "Merci d'indiquer un nombre, ou 'illimité'."
+                return with_cancel_button("Merci d'indiquer un nombre, ou 'illimité'.")
             slots["track_inventory"] = True
             slots["stock"] = int(match.group())
         state.advance(conversation, 4, slots)
         stock_line = "suivi non activé" if not slots["track_inventory"] else f"{slots['stock']} unité(s)"
-        return (
-            f"Récapitulatif : {slots['name']} — {int(slots['price'])} FCFA — {stock_line}.\n"
-            "Répondez 'confirmer' pour ajouter ce produit, ou 'annuler'."
-        )
+        recap = f"Récapitulatif : {slots['name']} — {int(slots['price'])} FCFA — {stock_line}."
+        return BotReply(text=recap, buttons=_CONFIRM_BUTTONS)
 
     if step == 4:
         if "confirmer" not in text.lower():
-            return "Répondez 'confirmer' pour ajouter ce produit, ou 'annuler'."
+            return BotReply(text="Voulez-vous ajouter ce produit ?", buttons=_CONFIRM_BUTTONS)
         product = Product(
             business_id=business.id,
             name=slots["name"],
@@ -268,13 +281,13 @@ async def _continue_add_product(db: AsyncSession, business: Business, conversati
         )
         db.add(product)
         state.clear_flow(conversation)
-        return f"{product.name} a été ajouté au catalogue. -- Jaaykat bi"
+        return with_merchant_menu(f"{product.name} a été ajouté au catalogue. -- Jaaykat bi")
 
     state.clear_flow(conversation)
-    return _MENU
+    return with_merchant_menu("Que souhaitez-vous faire ?")
 
 
-async def _continue_edit_product(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> str:
+async def _continue_edit_product(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
     step = state.current_step(conversation)
     slots = state.current_slots(conversation)
     products = await _products(db, business.id)
@@ -282,10 +295,14 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
     if step == 0:
         product = resolve_product(text, products)
         if product is None:
-            return f"Produit introuvable. Choisissez un numéro ou un nom :\n{_format_product_list(products)}"
+            return BotReply(
+                text="Produit introuvable. Choisissez dans la liste :",
+                list_button_text="Choisir",
+                list_sections=_product_list_sections(products),
+            )
         slots["product_id"] = str(product.id)
         state.advance(conversation, 1, slots)
-        return f"Que souhaitez-vous modifier pour {product.name} ?\n1. Prix\n2. Stock\n3. Disponibilité"
+        return BotReply(text=f"Que souhaitez-vous modifier pour {product.name} ?", buttons=_EDIT_FIELD_BUTTONS)
 
     if step == 1:
         t = text.strip().lower()
@@ -296,15 +313,13 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
         elif t.startswith("3") or "disponib" in t:
             field = "availability"
         else:
-            return "Répondez 1 (prix), 2 (stock) ou 3 (disponibilité)."
+            return BotReply(text="Que souhaitez-vous modifier ?", buttons=_EDIT_FIELD_BUTTONS)
         slots["field"] = field
         state.advance(conversation, 2, slots)
-        prompts = {
-            "price": "Quel est le nouveau prix en FCFA ?",
-            "stock": "Quel est le nouveau stock ?",
-            "availability": "Le produit doit-il être disponible ? (oui/non)",
-        }
-        return prompts[field]
+        if field == "availability":
+            return BotReply(text="Le produit doit-il être disponible ?", buttons=_YES_NO_BUTTONS)
+        prompts = {"price": "Quel est le nouveau prix en FCFA ?", "stock": "Quel est le nouveau stock ?"}
+        return with_cancel_button(prompts[field])
 
     if step == 2:
         product = await db.get(Product, UUID(slots["product_id"]))
@@ -315,30 +330,30 @@ async def _continue_edit_product(db: AsyncSession, business: Business, conversat
                 if price <= 0:
                     raise ValueError
             except ValueError:
-                return "Merci d'indiquer un prix valide (ex : 4500)."
+                return with_cancel_button("Merci d'indiquer un prix valide (ex : 4500).")
             product.price_xof = price
             confirmation = f"Le prix de {product.name} est désormais {int(price)} FCFA."
         elif field == "stock":
             match = re.search(r"\d+", text)
             if not match:
-                return "Merci d'indiquer un nombre."
+                return with_cancel_button("Merci d'indiquer un nombre.")
             product.track_inventory = True
             product.quantity_in_stock = int(match.group())
             confirmation = f"Le stock de {product.name} est désormais {product.quantity_in_stock}."
         else:
             t = text.strip().lower()
             if t not in {"oui", "non"}:
-                return "Répondez 'oui' ou 'non'."
+                return BotReply(text="Le produit doit-il être disponible ?", buttons=_YES_NO_BUTTONS)
             product.is_available = t == "oui"
             confirmation = f"{product.name} est désormais {'disponible' if product.is_available else 'indisponible'}."
         state.clear_flow(conversation)
-        return f"{confirmation} -- Jaaykat bi"
+        return with_merchant_menu(f"{confirmation} -- Jaaykat bi")
 
     state.clear_flow(conversation)
-    return _MENU
+    return with_merchant_menu("Que souhaitez-vous faire ?")
 
 
-async def _continue_delete_product(db: AsyncSession, conversation: Conversation, text: str) -> str:
+async def _continue_delete_product(db: AsyncSession, conversation: Conversation, text: str) -> BotReply:
     step = state.current_step(conversation)
     slots = state.current_slots(conversation)
 
@@ -346,25 +361,29 @@ async def _continue_delete_product(db: AsyncSession, conversation: Conversation,
         business_products = await _products_for_conversation(db, conversation)
         product = resolve_product(text, business_products)
         if product is None:
-            return f"Produit introuvable. Choisissez un numéro ou un nom :\n{_format_product_list(business_products)}"
+            return BotReply(
+                text="Produit introuvable. Choisissez dans la liste :",
+                list_button_text="Choisir",
+                list_sections=_product_list_sections(business_products),
+            )
         slots["product_id"] = str(product.id)
         state.advance(conversation, 1, slots)
-        return f"Confirmez-vous le retrait de {product.name} du catalogue ? (oui/non)"
+        return BotReply(text=f"Confirmez-vous le retrait de {product.name} du catalogue ?", buttons=_YES_NO_BUTTONS)
 
     if step == 1:
         t = text.strip().lower()
         if t not in {"oui", "non"}:
-            return "Répondez 'oui' ou 'non'."
+            return BotReply(text="Confirmez-vous le retrait de ce produit ?", buttons=_YES_NO_BUTTONS)
         product = await db.get(Product, UUID(slots["product_id"]))
         if t == "oui":
             product.is_available = False
             state.clear_flow(conversation)
-            return f"{product.name} a été retiré du catalogue. -- Jaaykat bi"
+            return with_merchant_menu(f"{product.name} a été retiré du catalogue. -- Jaaykat bi")
         state.clear_flow(conversation)
-        return "D'accord, le produit reste dans le catalogue."
+        return with_merchant_menu("D'accord, le produit reste dans le catalogue.")
 
     state.clear_flow(conversation)
-    return _MENU
+    return with_merchant_menu("Que souhaitez-vous faire ?")
 
 
 async def _products_for_conversation(db: AsyncSession, conversation: Conversation) -> list[Product]:
@@ -372,7 +391,7 @@ async def _products_for_conversation(db: AsyncSession, conversation: Conversatio
     return await _products(db, business.id)
 
 
-async def _continue_promotion(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> str:
+async def _continue_promotion(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
     step = state.current_step(conversation)
     slots = state.current_slots(conversation)
     products = await _products(db, business.id)
@@ -380,35 +399,40 @@ async def _continue_promotion(db: AsyncSession, business: Business, conversation
     if step == 0:
         product = resolve_product(text, products)
         if product is None:
-            return f"Produit introuvable. Choisissez un numéro ou un nom :\n{_format_product_list(products)}"
+            return BotReply(
+                text="Produit introuvable. Choisissez dans la liste :",
+                list_button_text="Choisir",
+                list_sections=_product_list_sections(products),
+            )
         slots["product_id"] = str(product.id)
         state.advance(conversation, 1, slots)
-        return "Quel pourcentage de réduction ? (ex : 10)"
+        return with_cancel_button("Quel pourcentage de réduction ? (ex : 10)")
 
     if step == 1:
         match = re.search(r"\d+", text)
         if not match or not (0 < int(match.group()) < 100):
-            return "Merci d'indiquer un pourcentage valide entre 1 et 99."
+            return with_cancel_button("Merci d'indiquer un pourcentage valide entre 1 et 99.")
         slots["discount_percent"] = int(match.group())
         state.advance(conversation, 2, slots)
-        return "Pendant combien de jours ? (ex : 3, 7 ou 14)"
+        return BotReply(text="Pendant combien de jours ?", buttons=_PROMO_DURATION_BUTTONS)
 
     if step == 2:
         match = re.search(r"\d+", text)
         if not match or int(match.group()) <= 0:
-            return "Merci d'indiquer un nombre de jours valide (ex : 7)."
+            return BotReply(text="Pendant combien de jours ?", buttons=_PROMO_DURATION_BUTTONS)
         slots["duration_days"] = int(match.group())
         state.advance(conversation, 3, slots)
         product = await db.get(Product, UUID(slots["product_id"]))
         discounted = round(float(product.price_xof) * (1 - slots["discount_percent"] / 100), 2)
-        return (
+        recap = (
             f"Promotion : {product.name} à {int(discounted)} FCFA (au lieu de {int(product.price_xof)} FCFA) "
-            f"pendant {slots['duration_days']} jours.\nRépondez 'confirmer' pour l'activer, ou 'annuler'."
+            f"pendant {slots['duration_days']} jours."
         )
+        return BotReply(text=recap, buttons=_CONFIRM_BUTTONS)
 
     if step == 3:
         if "confirmer" not in text.lower():
-            return "Répondez 'confirmer' pour activer la promotion, ou 'annuler'."
+            return BotReply(text="Voulez-vous activer cette promotion ?", buttons=_CONFIRM_BUTTONS)
         product = await db.get(Product, UUID(slots["product_id"]))
         promo = Promotion(
             business_id=business.id,
@@ -420,7 +444,7 @@ async def _continue_promotion(db: AsyncSession, business: Business, conversation
         )
         db.add(promo)
         state.clear_flow(conversation)
-        return f"Promotion activée sur {product.name}. -- Jaaykat bi"
+        return with_merchant_menu(f"Promotion activée sur {product.name}. -- Jaaykat bi")
 
     state.clear_flow(conversation)
-    return _MENU
+    return with_merchant_menu("Que souhaitez-vous faire ?")
