@@ -80,7 +80,11 @@ async def test_customer_return_request_flow_notifies_merchant(db_session):
     reply = await _customer_says(db_session, business, customer, customer_conv, "confirmer")
     assert order.order_number in reply.text
     assert reply.merchant_notification is not None
-    assert order.order_number in reply.merchant_notification
+    assert order.order_number in reply.merchant_notification.text
+    assert set(title for _id, title in reply.merchant_notification.buttons) == {
+        "Accepter le retour", "Ignorer la demande", "Retour",
+    }
+    assert reply.merchant_notification.order_number == order.order_number
     assert customer_conv.state["flow"] is None
 
     await db_session.flush()

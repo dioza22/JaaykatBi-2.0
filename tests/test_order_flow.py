@@ -91,9 +91,13 @@ async def test_full_order_flow_creates_order_and_deducts_stock(db_session):
     assert "référence CMD-" in reply.text
     assert "Mes commandes" in _button_titles(reply)  # customer menu re-attached
     assert reply.merchant_notification is not None
-    assert "Nouvelle commande" in reply.merchant_notification
-    assert "Amadou Fall" in reply.merchant_notification
-    assert "9000" in reply.merchant_notification
+    assert "Nouvelle commande" in reply.merchant_notification.text
+    assert "Amadou Fall" in reply.merchant_notification.text
+    assert "9000" in reply.merchant_notification.text
+    assert set(title for _id, title in reply.merchant_notification.buttons) == {
+        "Confirmer", "Annuler la commande", "Retour",
+    }
+    assert reply.merchant_notification.order_number is not None
 
     order = (await db_session.execute(select(Order).where(Order.business_id == business.id))).scalar_one()
     assert order.status == OrderStatus.PENDING
@@ -124,6 +128,40 @@ async def test_catalog_view_is_actionable_selecting_a_product_starts_ordering_it
     reply = await handle_message(db_session, business, contact, conversation, product.name, is_merchant=False)
     assert "Combien d'unités" in reply.text
     assert conversation.state["step"] == 1
+
+
+async def test_promotions_view_is_actionable_and_scoped_to_promoted_products(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    other_product = Product(business_id=business.id, name="Sucre en poudre 1 kg", price_xof=800)
+    db_session.add(other_product)  # no promotion — must not appear in the promotions list
+    db_session.add(
+        Promotion(
+            business_id=business.id, product_id=product.id, title="Promo -10%",
+            discount_percent=10, duration_days=7, end_date=datetime.now(UTC) + timedelta(days=7),
+        )
+    )
+    await db_session.flush()
+
+    reply = await handle_message(db_session, business, contact, conversation, "avez-vous des promotions", is_merchant=False)
+
+    assert product.name in _row_titles(reply)
+    assert other_product.name not in _row_titles(reply)
+    assert "Annuler" in _row_titles(reply)
+    assert conversation.state["flow"] == "commander_produit"  # actionable, same as the catalog
+    assert conversation.state["step"] == 0
+
+    reply = await handle_message(db_session, business, contact, conversation, product.name, is_merchant=False)
+    assert "Combien d'unités" in reply.text
+    assert conversation.state["step"] == 1
+
+
+async def test_promotions_view_reports_none_active(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+
+    reply = await handle_message(db_session, business, contact, conversation, "avez-vous des promotions", is_merchant=False)
+
+    assert "pas de promotion" in reply.text.lower()
+    assert conversation.state.get("flow") is None
 
 
 async def test_order_flow_pickup_skips_address_step(db_session):

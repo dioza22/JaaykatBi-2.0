@@ -365,12 +365,15 @@ async def test_pending_orders_typed_shortcut_still_works(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, f"{order.order_number} confirmer")
     assert "confirmée" in reply.text
     assert conversation.state.get("flow") is None  # shortcut resolves and exits the flow
+    assert reply.customer_notification is not None  # the typed shorthand notifies the customer too
+    assert reply.customer_notification[0] == customer.wa_id
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.CONFIRMED
 
     reply = await _merchant_says(db_session, business, contact, conversation, f"{order.order_number} livrer")
     assert "livrée" in reply.text
+    assert reply.customer_notification is not None
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.FULFILLED
@@ -398,6 +401,11 @@ async def test_pending_orders_guided_list_and_submenu_confirm(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, "Confirmer")
     assert "confirmée" in reply.text
     assert conversation.state.get("flow") is None
+    assert reply.customer_notification is not None
+    wa_id, notif_text = reply.customer_notification
+    assert wa_id == customer.wa_id
+    assert order.order_number in notif_text
+    assert "✅" in notif_text
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.CONFIRMED
@@ -428,11 +436,39 @@ async def test_pending_orders_submenu_fulfill_action_via_button_tap(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, "Marquer livrée")
     assert "livrée" in reply.text
     assert conversation.state.get("flow") is None
+    assert reply.customer_notification is not None
+    wa_id, notif_text = reply.customer_notification
+    assert wa_id == customer.wa_id
+    assert order.order_number in notif_text
+    assert "récupérée en boutique" in notif_text  # PICKUP order — worded accordingly
 
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.FULFILLED
     assert order.fulfilled_at is not None
+
+
+async def test_fulfilled_notification_wording_for_delivery_orders(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
+    db_session.add(customer)
+    await db_session.flush()
+
+    order = await create_order(
+        db_session, business, customer, product, 1, "Client Test",
+        DeliveryType.DELIVERY, "Rue 10, Dakar", PaymentMethod.CASH,
+    )
+    await confirm_order(order)
+    await db_session.flush()
+
+    await _merchant_says(db_session, business, contact, conversation, "mes commandes")
+    await _merchant_says(db_session, business, contact, conversation, order.order_number)
+    reply = await _merchant_says(db_session, business, contact, conversation, "Marquer livrée")
+
+    assert reply.customer_notification is not None
+    _wa_id, notif_text = reply.customer_notification
+    assert "livrée" in notif_text
+    assert "récupérée" not in notif_text
 
 
 async def test_pending_orders_submenu_cancel_order_action(db_session):

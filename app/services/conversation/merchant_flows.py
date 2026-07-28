@@ -15,7 +15,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Business, Contact, Conversation, Order, OrderStatus, Product, Promotion
+from app.models import Business, Contact, Conversation, DeliveryType, Order, OrderStatus, Product, Promotion
 from app.services.conversation import state
 from app.services.conversation.intents import Intent, detect_intent
 from app.services.conversation.order_lookup import resolve_order
@@ -203,7 +203,7 @@ async def _catalog_message(db: AsyncSession, business: Business) -> str:
     return "\n".join(lines).strip()
 
 
-async def _handle_order_command(db: AsyncSession, business: Business, text: str) -> str | None:
+async def _handle_order_command(db: AsyncSession, business: Business, text: str) -> BotReply | None:
     match = _ORDER_COMMAND_RE.match(text.strip())
     if not match:
         return None
@@ -213,24 +213,26 @@ async def _handle_order_command(db: AsyncSession, business: Business, text: str)
         select(Order).where(Order.business_id == business.id, Order.order_number == order_number)
     )
     if order is None:
-        return f"Commande {order_number} introuvable."
+        return with_merchant_menu(f"Commande {order_number} introuvable.")
 
     if action == "confirmer":
         if order.status != OrderStatus.PENDING:
-            return f"{order_number} n'est pas en attente (statut actuel : {order.status.value})."
+            return with_merchant_menu(f"{order_number} n'est pas en attente (statut actuel : {order.status.value}).")
         await confirm_order(order)
-        return f"{order_number} marquée comme confirmée."
+        customer_notification = await _customer_status_notification(db, order, _order_confirmed_notification_text(order))
+        return with_merchant_menu(f"{order_number} marquée comme confirmée.", customer_notification=customer_notification)
 
     if action == "livrer":
         if order.status != OrderStatus.CONFIRMED:
-            return f"{order_number} doit d'abord être confirmée (statut actuel : {order.status.value})."
+            return with_merchant_menu(f"{order_number} doit d'abord être confirmée (statut actuel : {order.status.value}).")
         await fulfill_order(order)
-        return f"{order_number} marquée comme livrée. Merci !"
+        customer_notification = await _customer_status_notification(db, order, _order_fulfilled_notification_text(order))
+        return with_merchant_menu(f"{order_number} marquée comme livrée. Merci !", customer_notification=customer_notification)
 
     if order.status == OrderStatus.CANCELLED:
-        return f"{order_number} est déjà annulée."
+        return with_merchant_menu(f"{order_number} est déjà annulée.")
     await cancel_order(db, order, reason="Annulée par le marchand via WhatsApp")
-    return f"{order_number} a été annulée."
+    return with_merchant_menu(f"{order_number} a été annulée.")
 
 
 async def _sales_summary(db: AsyncSession, business: Business) -> str:
@@ -318,6 +320,28 @@ def _actions_for_order(order: Order) -> list[tuple[str, str]]:
     return _ORDER_ACTIONS_BY_STATUS.get(order.status, [])
 
 
+async def _customer_status_notification(db: AsyncSession, order: Order, text: str) -> tuple[str, str] | None:
+    """Pure informational status update for the customer who placed the
+    order — no actions attached, by design (there's nothing for them to
+    decide here, just progress to see)."""
+    contact = await db.get(Contact, order.contact_id)
+    if contact is None:
+        return None
+    return (contact.wa_id, text)
+
+
+def _order_confirmed_notification_text(order: Order) -> str:
+    return f"✅ Bonne nouvelle ! Votre commande {order.order_number} a été confirmée et est en cours de préparation. -- Jaaykat bi"
+
+
+def _order_fulfilled_notification_text(order: Order) -> str:
+    delivery_word = "récupérée en boutique" if order.delivery_type == DeliveryType.PICKUP else "livrée"
+    return (
+        f"🎉📦 Votre commande {order.order_number} a été {delivery_word} avec succès. "
+        f"Merci pour votre confiance ! -- Jaaykat bi"
+    )
+
+
 async def _pending_human_handoffs(db: AsyncSession, business: Business) -> str:
     conversations = (
         await db.execute(
@@ -347,7 +371,7 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
     matches."""
     order_command_reply = await _handle_order_command(db, business, text)
     if order_command_reply is not None:
-        return with_merchant_menu(order_command_reply)
+        return order_command_reply
 
     intent = detect_intent(text, is_merchant=True)
 
@@ -860,7 +884,7 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
         shortcut_reply = await _handle_order_command(db, business, text)
         if shortcut_reply is not None:
             state.clear_flow(conversation)
-            return with_merchant_menu(shortcut_reply)
+            return shortcut_reply
 
         orders = await _orders_for_merchant_view(db, business.id)
         order = resolve_order(text, orders)
@@ -926,12 +950,22 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
         if "confirmer" in t and order.status == OrderStatus.PENDING:
             await confirm_order(order)
             state.clear_flow(conversation)
-            return with_merchant_menu(f"{order.order_number} marquée comme confirmée.")
+            customer_notification = await _customer_status_notification(
+                db, order, _order_confirmed_notification_text(order)
+            )
+            return with_merchant_menu(
+                f"{order.order_number} marquée comme confirmée.", customer_notification=customer_notification
+            )
 
         if "livr" in t and order.status == OrderStatus.CONFIRMED:  # matches "livrer" (typed) and "livrée" (button)
             await fulfill_order(order)
             state.clear_flow(conversation)
-            return with_merchant_menu(f"{order.order_number} marquée comme livrée. Merci !")
+            customer_notification = await _customer_status_notification(
+                db, order, _order_fulfilled_notification_text(order)
+            )
+            return with_merchant_menu(
+                f"{order.order_number} marquée comme livrée. Merci !", customer_notification=customer_notification
+            )
 
         if "annuler la commande" in t and order.status in (OrderStatus.PENDING, OrderStatus.CONFIRMED):
             await cancel_order(db, order, reason="Annulée par le marchand via WhatsApp")

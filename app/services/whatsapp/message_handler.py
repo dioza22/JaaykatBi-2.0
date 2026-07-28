@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Business, Contact, Conversation, ConversationStatus, Message, MessageDirection, MessageType
 from app.schemas.whatsapp import InboundMessage, WAStatus, WhatsAppWebhookPayload
+from app.services.conversation import state
 from app.services.conversation.engine import handle_message
+from app.services.conversation.merchant_flows import VIEW_ORDERS_FLOW
+from app.services.conversation.reply import MerchantNotification
 from app.services.whatsapp.client import WhatsAppClient, normalize_phone_number
 from app.services.whatsapp.webhook_parser import parse_inbound_messages, parse_statuses
 
@@ -187,27 +190,71 @@ async def _handle_inbound(db: AsyncSession, whatsapp_client: WhatsAppClient, inb
     if reply and reply.merchant_notification:
         await _notify_merchant(db, whatsapp_client, business, reply.merchant_notification)
 
+    if reply and reply.customer_notification:
+        wa_id, text = reply.customer_notification
+        await _send_notification(db, whatsapp_client, business, wa_id, text)
 
-async def _notify_merchant(db: AsyncSession, whatsapp_client: WhatsAppClient, business: Business, text: str) -> None:
-    """A separate, proactive WhatsApp message to the merchant — e.g. a new
-    pending order needs their attention — independent of whatever reply just
-    went to the customer. Logged into the merchant's own conversation so it
-    shows up in their history (and the LLM fallback's context) too."""
-    if not business.owner_whatsapp_number:
+
+async def _send_notification(
+    db: AsyncSession,
+    whatsapp_client: WhatsAppClient,
+    business: Business,
+    wa_id: str | None,
+    text: str,
+    buttons: list[tuple[str, str]] | None = None,
+) -> None:
+    """A separate, proactive WhatsApp message — independent of whatever
+    reply just went to whoever triggered it. Logged into the recipient's own
+    conversation so it shows up in their history (and the LLM fallback's
+    context) too."""
+    if not wa_id:
         return
-    merchant_contact = await _get_or_create_contact(db, business, business.owner_whatsapp_number)
-    merchant_conversation = await _get_or_create_conversation(db, business, merchant_contact)
+    contact = await _get_or_create_contact(db, business, wa_id)
+    conversation = await _get_or_create_conversation(db, business, contact)
     db.add(
         Message(
-            conversation_id=merchant_conversation.id,
+            conversation_id=conversation.id,
             direction=MessageDirection.OUTBOUND,
             content=text,
             was_ai_generated=False,
         )
     )
-    merchant_conversation.message_count += 1
-    merchant_conversation.last_message_at = datetime.now(UTC)
+    conversation.message_count += 1
+    conversation.last_message_at = datetime.now(UTC)
     try:
-        await whatsapp_client.send_text(business.owner_whatsapp_number, text)
+        if buttons:
+            await whatsapp_client.send_buttons(wa_id, text, buttons)
+        else:
+            await whatsapp_client.send_text(wa_id, text)
     except Exception:
-        logger.warning("merchant notification send failed for business %s", business.id, exc_info=True)
+        logger.warning("notification send failed for business %s wa_id %s", business.id, wa_id, exc_info=True)
+
+
+async def _notify_merchant(
+    db: AsyncSession, whatsapp_client: WhatsAppClient, business: Business, notification: MerchantNotification
+) -> None:
+    """Order-related notifications (a new pending order, a return request)
+    carry action buttons — when they do, the merchant's own conversation is
+    seeded to the "view this order" submenu first (same state
+    _continue_view_orders would set after they pick the order from a list),
+    so tapping a button resolves immediately. Only done when the merchant
+    has no flow already in progress, so it never silently interrupts
+    something else they were in the middle of (e.g. adding a product)."""
+    if not business.owner_whatsapp_number:
+        return
+
+    text = notification.text
+    buttons = notification.buttons
+    if notification.order_number and notification.buttons:
+        merchant_contact = await _get_or_create_contact(db, business, business.owner_whatsapp_number)
+        merchant_conversation = await _get_or_create_conversation(db, business, merchant_contact)
+        if state.current_flow(merchant_conversation) is None:
+            state.start_flow(merchant_conversation, VIEW_ORDERS_FLOW)
+            state.advance(merchant_conversation, 1, {"order_number": notification.order_number})
+        else:
+            # Busy with something else — showing buttons that wouldn't
+            # resolve against that other flow would be worse than none.
+            buttons = None
+            text = f"{text} Répondez 'mes commandes' pour la traiter."
+
+    await _send_notification(db, whatsapp_client, business, business.owner_whatsapp_number, text, buttons=buttons)

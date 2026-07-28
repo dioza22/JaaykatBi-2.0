@@ -12,18 +12,36 @@ from dataclasses import dataclass
 
 
 @dataclass
+class MerchantNotification:
+    text: str
+    buttons: list[tuple[str, str]] | None = None  # [(id, title)], max 3
+    order_number: str | None = None
+    # When set, message_handler seeds the merchant's conversation state to
+    # the "view this order" submenu (merchant_flows.VIEW_ORDERS_FLOW, step 1)
+    # before sending — but ONLY if the merchant has no flow already in
+    # progress, so an in-progress merchant task (e.g. adding a product)
+    # never gets silently hijacked by an inbound order notification.
+
+
+@dataclass
 class BotReply:
     text: str
     buttons: list[tuple[str, str]] | None = None  # [(id, title)], max 3
     list_button_text: str | None = None
     list_sections: list[tuple[str, list[tuple[str, str, str]]]] | None = None
     # [(section_title, [(row_id, row_title, row_description)])]
-    merchant_notification: str | None = None
+    merchant_notification: MerchantNotification | None = None
     # Set when the customer-side reply should also trigger a separate WhatsApp
     # message to the merchant (e.g. a new pending order needs their
     # attention) — message_handler.py sends this to business.owner_whatsapp_number
     # once it's done sending the main `text` reply to whoever it's actually
     # replying to.
+    customer_notification: tuple[str, str] | None = None
+    # (wa_id, text) — the inverse of merchant_notification: set when a
+    # MERCHANT-side action (confirming/fulfilling an order) should push a
+    # plain-text status update to the customer who placed it. No actions
+    # attached by design — it's a pure FYI, not a decision the customer
+    # needs to make.
 
 
 # Appended to every list-based prompt (product pickers, and any bounded
@@ -79,11 +97,16 @@ MERCHANT_MENU_SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
 ]
 
 
-def with_merchant_menu(text: str) -> BotReply:
-    return BotReply(text=text, list_button_text="Menu", list_sections=MERCHANT_MENU_SECTIONS)
+def with_merchant_menu(text: str, customer_notification: tuple[str, str] | None = None) -> BotReply:
+    return BotReply(
+        text=text,
+        list_button_text="Menu",
+        list_sections=MERCHANT_MENU_SECTIONS,
+        customer_notification=customer_notification,
+    )
 
 
-def with_customer_menu(text: str, merchant_notification: str | None = None) -> BotReply:
+def with_customer_menu(text: str, merchant_notification: MerchantNotification | None = None) -> BotReply:
     # "Commander" isn't its own button here — tapping "Voir catalogue" already
     # lands straight in the order flow (see customer_flows.catalog_message),
     # so keeping both would just be two buttons for the same destination.

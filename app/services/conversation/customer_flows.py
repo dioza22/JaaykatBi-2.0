@@ -14,10 +14,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Business, Contact, Conversation, DeliveryType, Order, OrderStatus, PaymentMethod, Product
-from app.services.conversation import state
+from app.services.conversation import merchant_flows, state
 from app.services.conversation.order_lookup import resolve_order
 from app.services.conversation.product_lookup import resolve_product
-from app.services.conversation.reply import ANNULER_SECTION, BotReply, cap_total_rows, with_cancel_button, with_customer_menu
+from app.services.conversation.reply import (
+    ANNULER_SECTION,
+    BotReply,
+    MerchantNotification,
+    cap_total_rows,
+    with_cancel_button,
+    with_customer_menu,
+)
 from app.services.orders.service import (
     InsufficientStockError,
     cancel_order,
@@ -82,16 +89,30 @@ async def catalog_message(db: AsyncSession, business: Business, conversation: Co
     return reply
 
 
-async def promotions_message(db: AsyncSession, business: Business) -> BotReply:
-    products = await available_products(db, business.id)
-    promo_lines = []
+async def _promoted_products(db: AsyncSession, business_id: UUID) -> list[Product]:
+    products = await available_products(db, business_id)
+    promoted = []
     for product in products:
         price = await effective_price(db, product)
         if price < float(product.price_xof):
-            promo_lines.append(f"- {product.name} : {int(price)} FCFA (au lieu de {int(product.price_xof)} FCFA)")
-    if not promo_lines:
+            promoted.append(product)
+    return promoted
+
+
+async def promotions_message(db: AsyncSession, business: Business, conversation: Conversation) -> BotReply:
+    """Same actionable list format as the catalog (see catalog_message) —
+    scoped to only currently-promoted products. Selecting one starts the
+    order flow for it directly."""
+    products = await _promoted_products(db, business.id)
+    if not products:
         return BotReply(text="Nous n'avons pas de promotion en cours pour le moment. -- Jaaykat bi")
-    return BotReply(text="Nos promotions en cours :\n" + "\n".join(promo_lines))
+    state.start_flow(conversation, ORDER_FLOW)
+    sections = await _product_list_sections(db, products, include_cancel=True)
+    return BotReply(
+        text="Voici nos promotions en cours. Sélectionnez un produit pour passer commande.",
+        list_button_text="Promotions",
+        list_sections=sections,
+    )
 
 
 def _extract_quantity(text: str) -> int | None:
@@ -252,9 +273,13 @@ async def continue_order_flow(
                 "retrait en boutique" if order.delivery_type == DeliveryType.PICKUP
                 else f"livraison à {order.delivery_address}"
             )
-            merchant_notification = (
-                f"🔔 Nouvelle commande {order.order_number} de {order.customer_name} — "
-                f"{int(order.total_xof)} FCFA ({delivery_line}). Répondez 'mes commandes' pour la traiter."
+            merchant_notification = MerchantNotification(
+                text=(
+                    f"🔔 Nouvelle commande {order.order_number} de {order.customer_name} — "
+                    f"{int(order.total_xof)} FCFA ({delivery_line})."
+                ),
+                buttons=merchant_flows._actions_for_order(order),
+                order_number=order.order_number,
             )
             return with_customer_menu(
                 f"Votre commande a été enregistrée sous la référence {order.order_number}. "
@@ -330,9 +355,10 @@ async def continue_return_flow(
             order = await db.get(Order, UUID(slots["order_id"]))
             order.request_return()
             state.clear_flow(conversation)
-            merchant_notification = (
-                f"🔔 Demande de retour pour la commande {order.order_number} "
-                f"({int(order.total_xof)} FCFA). Répondez 'mes commandes' pour la traiter."
+            merchant_notification = MerchantNotification(
+                text=f"🔔 Demande de retour pour la commande {order.order_number} ({int(order.total_xof)} FCFA).",
+                buttons=merchant_flows._actions_for_order(order),
+                order_number=order.order_number,
             )
             return with_customer_menu(
                 f"Votre demande de retour pour la commande {order.order_number} a été transmise au commerçant. "
@@ -367,6 +393,17 @@ async def _ongoing_orders(db: AsyncSession, contact_id: UUID) -> list[Order]:
     return orders
 
 
+def _ongoing_order_row(order: Order) -> tuple[str, str, str]:
+    """Order ID is the row title; the description carries the rest of what
+    the customer needs to recognize their own order at a glance — product,
+    quantity, total, and when it was placed (status is already implied by
+    which section — En attente/Confirmées — the row appears under)."""
+    item = order.items[0]
+    date_str = order.created_at.strftime("%d/%m/%Y")
+    description = f"{item.product_name} x{item.quantity} — {int(order.total_xof)} FCFA — {date_str}"
+    return (order.order_number, order.order_number, description)
+
+
 def _ongoing_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[tuple[str, str, str]]]]:
     by_status = {OrderStatus.PENDING: [], OrderStatus.CONFIRMED: []}
     for order in orders:
@@ -374,10 +411,7 @@ def _ongoing_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[t
     labels = {OrderStatus.PENDING: "En attente", OrderStatus.CONFIRMED: "Confirmées"}
     sections = []
     for status in (OrderStatus.PENDING, OrderStatus.CONFIRMED):
-        rows = [
-            (order.order_number, order.order_number, f"{int(order.total_xof)} FCFA — {order.status.value}")
-            for order in by_status[status]
-        ]
+        rows = [_ongoing_order_row(order) for order in by_status[status]]
         if rows:
             sections.append((labels[status], rows))
     return cap_total_rows(sections) + [ANNULER_SECTION]
@@ -473,9 +507,8 @@ async def continue_my_orders_flow(
             if order.is_freely_cancellable():
                 await cancel_order(db, order, reason="Annulée par le client via WhatsApp")
                 state.clear_flow(conversation)
-                merchant_notification = (
-                    f"🔔 Commande {order.order_number} annulée par le client. "
-                    f"Répondez 'mes commandes' pour plus de détails."
+                merchant_notification = MerchantNotification(
+                    text=f"🔔 Commande {order.order_number} annulée par le client."
                 )
                 return with_customer_menu(
                     f"Votre commande {order.order_number} a été annulée. -- Jaaykat bi",
@@ -555,9 +588,8 @@ async def continue_my_orders_flow(
                 return with_cancel_button(f"{exc} Merci d'indiquer une quantité plus faible.")
             state.clear_flow(conversation)
             item = order.items[0]
-            merchant_notification = (
-                f"🔔 Commande {order.order_number} modifiée par le client : quantité → {new_quantity}. "
-                f"Répondez 'mes commandes' pour la traiter."
+            merchant_notification = MerchantNotification(
+                text=f"🔔 Commande {order.order_number} modifiée par le client : quantité → {new_quantity}."
             )
             return with_customer_menu(
                 f"La quantité de votre commande {order.order_number} a été mise à jour "
@@ -571,9 +603,8 @@ async def continue_my_orders_flow(
                 return with_cancel_button("Merci d'indiquer un nom valide.")
             order.customer_name = new_name
             state.clear_flow(conversation)
-            merchant_notification = (
-                f"🔔 Commande {order.order_number} modifiée par le client : nouveau nom → {new_name}. "
-                f"Répondez 'mes commandes' pour la traiter."
+            merchant_notification = MerchantNotification(
+                text=f"🔔 Commande {order.order_number} modifiée par le client : nouveau nom → {new_name}."
             )
             return with_customer_menu(
                 f"Le nom associé à votre commande {order.order_number} a été mis à jour ({new_name}). -- Jaaykat bi",
@@ -585,9 +616,8 @@ async def continue_my_orders_flow(
             return with_cancel_button("Merci d'indiquer une adresse valide.")
         order.delivery_address = new_address
         state.clear_flow(conversation)
-        merchant_notification = (
-            f"🔔 Commande {order.order_number} modifiée par le client : nouvelle adresse de livraison. "
-            f"Répondez 'mes commandes' pour la traiter."
+        merchant_notification = MerchantNotification(
+            text=f"🔔 Commande {order.order_number} modifiée par le client : nouvelle adresse de livraison."
         )
         return with_customer_menu(
             f"L'adresse de livraison de votre commande {order.order_number} a été mise à jour. -- Jaaykat bi",
@@ -607,8 +637,9 @@ async def continue_my_orders_flow(
             )
             state.clear_flow(conversation)
             fee_line = f" Des frais de {fee_amount} FCFA restent dus au commerçant." if fee_amount else ""
-            merchant_notification = f"🔔 Commande {order.order_number} annulée par le client (hors délai)." + (
-                f" {fee_amount} FCFA de frais à recouvrer." if fee_amount else ""
+            merchant_notification = MerchantNotification(
+                text=f"🔔 Commande {order.order_number} annulée par le client (hors délai)."
+                + (f" {fee_amount} FCFA de frais à recouvrer." if fee_amount else "")
             )
             return with_customer_menu(
                 f"Votre commande {order.order_number} a été annulée.{fee_line} -- Jaaykat bi",

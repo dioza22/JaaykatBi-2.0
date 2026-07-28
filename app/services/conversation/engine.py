@@ -158,7 +158,7 @@ async def handle_message(
 
     if intent == Intent.VOIR_PROMOTIONS:
         state.reset_unknown_streak(conversation)
-        return await customer_flows.promotions_message(db, business)
+        return await customer_flows.promotions_message(db, business, conversation)
 
     if intent == Intent.COMMANDER_PRODUIT:
         state.reset_unknown_streak(conversation)

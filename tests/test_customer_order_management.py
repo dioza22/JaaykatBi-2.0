@@ -58,6 +58,10 @@ def _row_titles(reply):
     return [row[1] for section in reply.list_sections for row in section[1]]
 
 
+def _row_descriptions(reply):
+    return [row[2] for section in reply.list_sections for row in section[1]]
+
+
 def _section_labels(reply):
     return [section[0] for section in reply.list_sections]
 
@@ -89,6 +93,20 @@ async def test_ongoing_orders_grouped_by_status_excludes_fulfilled(db_session):
     assert pending_order.order_number in row_titles
     assert confirmed_order.order_number in row_titles
     assert fulfilled_order.order_number not in row_titles
+
+
+async def test_ongoing_order_row_shows_product_quantity_total_and_date(db_session):
+    business, product, customer, conversation = await _setup(db_session)
+    order = await _place_order(db_session, business, product, customer, quantity=3)
+    await db_session.flush()
+
+    reply = await _customer_says(db_session, business, customer, conversation, "mes commandes")
+
+    description = _row_descriptions(reply)[0]
+    assert product.name in description
+    assert "x3" in description
+    assert "13500" in description  # 3 x 4500
+    assert order.created_at.strftime("%d/%m/%Y") in description
 
 
 async def test_ongoing_orders_list_never_exceeds_whatsapp_total_row_cap(db_session):
@@ -179,7 +197,8 @@ async def test_late_cancellation_confirmed_order_discloses_configured_fee(db_ses
 
     reply = await _customer_says(db_session, business, customer, conversation, "confirmer")
     assert "450 FCFA" in reply.text
-    assert "450 FCFA" in reply.merchant_notification
+    assert "450 FCFA" in reply.merchant_notification.text
+    assert reply.merchant_notification.buttons is None  # already resolved — nothing to approve
 
     await db_session.flush()
     await db_session.refresh(order)
@@ -297,7 +316,7 @@ async def test_update_customer_name_available_on_any_order(db_session):
     assert "mis à jour" in reply.text.lower()
     assert "Amadou Fall Jr" in reply.text
     assert reply.merchant_notification is not None
-    assert "Amadou Fall Jr" in reply.merchant_notification
+    assert "Amadou Fall Jr" in reply.merchant_notification.text
     assert conversation.state.get("flow") is None
 
     await db_session.flush()
