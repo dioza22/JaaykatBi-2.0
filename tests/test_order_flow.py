@@ -47,6 +47,19 @@ def _button_titles(reply):
     return [title for _id, title in reply.buttons]
 
 
+async def test_customer_menu_offers_mes_commandes_and_drops_redundant_commander(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+
+    reply = await handle_message(db_session, business, contact, conversation, "Bonjour", is_merchant=False)
+
+    assert set(_button_titles(reply)) == {"Voir catalogue", "Mes commandes", "Promotions"}
+    assert "Commander" not in _button_titles(reply)  # redundant now — catalogue leads to the same order flow
+
+    # tapping it works the same as typing "mes commandes"
+    reply = await handle_message(db_session, business, contact, conversation, "Mes commandes", is_merchant=False)
+    assert "aucune commande en cours" in reply.text.lower()
+
+
 async def test_full_order_flow_creates_order_and_deducts_stock(db_session):
     business, product, contact, conversation = await _setup(db_session)
 
@@ -76,7 +89,7 @@ async def test_full_order_flow_creates_order_and_deducts_stock(db_session):
 
     reply = await handle_message(db_session, business, contact, conversation, "confirmer", is_merchant=False)
     assert "référence CMD-" in reply.text
-    assert "Commander" in _button_titles(reply)  # customer menu re-attached
+    assert "Mes commandes" in _button_titles(reply)  # customer menu re-attached
     assert reply.merchant_notification is not None
     assert "Nouvelle commande" in reply.merchant_notification
     assert "Amadou Fall" in reply.merchant_notification
@@ -154,7 +167,7 @@ async def test_order_flow_can_be_cancelled_mid_flow(db_session):
 
     assert "annulé" in reply.text.lower()
     assert conversation.state["flow"] is None
-    assert "Commander" in _button_titles(reply)  # customer menu re-attached
+    assert "Mes commandes" in _button_titles(reply)  # customer menu re-attached
 
     orders = (await db_session.execute(select(Order).where(Order.business_id == business.id))).scalars().all()
     assert orders == []

@@ -228,7 +228,7 @@ async def test_update_quantity_recomputes_stock_total_and_contact_spend(db_sessi
     await _customer_says(db_session, business, customer, conversation, "mes commandes")
     await _customer_says(db_session, business, customer, conversation, order.order_number)
     reply = await _customer_says(db_session, business, customer, conversation, "Mettre à jour")
-    assert set(_button_titles(reply)) == {"Quantité", "Annuler"}  # pickup order — no address option
+    assert set(_row_titles(reply)) == {"Quantité", "Nom", "Annuler"}  # pickup order — no address option
 
     reply = await _customer_says(db_session, business, customer, conversation, "Quantité")
     assert "2" in reply.text
@@ -269,7 +269,7 @@ async def test_update_address_only_offered_for_delivery_orders(db_session):
     await _customer_says(db_session, business, customer, conversation, "mes commandes")
     await _customer_says(db_session, business, customer, conversation, order.order_number)
     reply = await _customer_says(db_session, business, customer, conversation, "Mettre à jour")
-    assert set(_button_titles(reply)) == {"Quantité", "Adresse", "Annuler"}
+    assert set(_row_titles(reply)) == {"Quantité", "Adresse", "Nom", "Annuler"}
 
     reply = await _customer_says(db_session, business, customer, conversation, "Adresse")
     assert "Rue 10, Dakar" in reply.text
@@ -281,3 +281,25 @@ async def test_update_address_only_offered_for_delivery_orders(db_session):
     await db_session.flush()
     await db_session.refresh(order)
     assert order.delivery_address == "Rue 20, Pikine"
+
+
+async def test_update_customer_name_available_on_any_order(db_session):
+    business, product, customer, conversation = await _setup(db_session)
+    order = await _place_order(db_session, business, product, customer)  # pickup order
+
+    await _customer_says(db_session, business, customer, conversation, "mes commandes")
+    await _customer_says(db_session, business, customer, conversation, order.order_number)
+    await _customer_says(db_session, business, customer, conversation, "Mettre à jour")
+    reply = await _customer_says(db_session, business, customer, conversation, "Nom")
+    assert order.customer_name in reply.text
+
+    reply = await _customer_says(db_session, business, customer, conversation, "Amadou Fall Jr")
+    assert "mis à jour" in reply.text.lower()
+    assert "Amadou Fall Jr" in reply.text
+    assert reply.merchant_notification is not None
+    assert "Amadou Fall Jr" in reply.merchant_notification
+    assert conversation.state.get("flow") is None
+
+    await db_session.flush()
+    await db_session.refresh(order)
+    assert order.customer_name == "Amadou Fall Jr"

@@ -389,10 +389,12 @@ async def _get_contact_order(db: AsyncSession, contact_id: UUID, order_number: s
     return await db.scalar(select(Order).where(Order.contact_id == contact_id, Order.order_number == order_number))
 
 
-def _update_field_buttons(order: Order) -> list[tuple[str, str]]:
+def _update_field_sections(order: Order) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    rows = [("qty", "Quantité", "Changer la quantité commandée")]
     if order.delivery_type == DeliveryType.DELIVERY:
-        return [("qty", "Quantité"), ("address", "Adresse"), ("annuler", "Annuler")]
-    return [("qty", "Quantité"), ("annuler", "Annuler")]
+        rows.append(("address", "Adresse", "Changer l'adresse de livraison"))
+    rows.append(("name", "Nom", "Corriger le nom associé à la commande"))
+    return cap_total_rows([("Modifier", rows)]) + [ANNULER_SECTION]
 
 
 async def start_my_orders_flow(db: AsyncSession, contact: Contact, conversation: Conversation) -> BotReply:
@@ -461,7 +463,11 @@ async def continue_my_orders_flow(
 
         if "mettre à jour" in t or "mettre a jour" in t:
             state.advance(conversation, 10, slots)
-            return BotReply(text="Que souhaitez-vous modifier ?", buttons=_update_field_buttons(order))
+            return BotReply(
+                text="Que souhaitez-vous modifier ?",
+                list_button_text="Choisir",
+                list_sections=_update_field_sections(order),
+            )
 
         if "annuler la commande" in t:
             if order.is_freely_cancellable():
@@ -512,7 +518,8 @@ async def continue_my_orders_flow(
             if order.delivery_type != DeliveryType.DELIVERY:
                 return BotReply(
                     text="Cette commande est un retrait en boutique, il n'y a pas d'adresse à modifier.",
-                    buttons=_update_field_buttons(order),
+                    list_button_text="Choisir",
+                    list_sections=_update_field_sections(order),
                 )
             slots["update_field"] = "address"
             state.advance(conversation, 11, slots)
@@ -520,7 +527,16 @@ async def continue_my_orders_flow(
                 f"Quelle est la nouvelle adresse de livraison ? (actuelle : {order.delivery_address})"
             )
 
-        return BotReply(text="Que souhaitez-vous modifier ?", buttons=_update_field_buttons(order))
+        if "nom" in t:
+            slots["update_field"] = "name"
+            state.advance(conversation, 11, slots)
+            return with_cancel_button(
+                f"Quel est le nom correct pour cette commande ? (actuel : {order.customer_name})"
+            )
+
+        return BotReply(
+            text="Que souhaitez-vous modifier ?", list_button_text="Choisir", list_sections=_update_field_sections(order)
+        )
 
     if step == 11:
         order = await _get_contact_order(db, contact.id, slots.get("order_number"))
@@ -546,6 +562,21 @@ async def continue_my_orders_flow(
             return with_customer_menu(
                 f"La quantité de votre commande {order.order_number} a été mise à jour "
                 f"({new_quantity} x {item.product_name}, {int(order.total_xof)} FCFA). -- Jaaykat bi",
+                merchant_notification=merchant_notification,
+            )
+
+        if field == "name":
+            new_name = text.strip()
+            if not new_name:
+                return with_cancel_button("Merci d'indiquer un nom valide.")
+            order.customer_name = new_name
+            state.clear_flow(conversation)
+            merchant_notification = (
+                f"🔔 Commande {order.order_number} modifiée par le client : nouveau nom → {new_name}. "
+                f"Répondez 'mes commandes' pour la traiter."
+            )
+            return with_customer_menu(
+                f"Le nom associé à votre commande {order.order_number} a été mis à jour ({new_name}). -- Jaaykat bi",
                 merchant_notification=merchant_notification,
             )
 

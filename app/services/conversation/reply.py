@@ -84,12 +84,16 @@ def with_merchant_menu(text: str) -> BotReply:
 
 
 def with_customer_menu(text: str, merchant_notification: str | None = None) -> BotReply:
+    # "Commander" isn't its own button here — tapping "Voir catalogue" already
+    # lands straight in the order flow (see customer_flows.catalog_message),
+    # so keeping both would just be two buttons for the same destination.
+    # That freed the 3rd slot for "Mes commandes".
     return BotReply(
         text=text,
         buttons=[
             ("voir_catalogue", "Voir catalogue"),
+            ("mes_commandes_client", "Mes commandes"),
             ("voir_promotions", "Promotions"),
-            ("commander_produit", "Commander"),
         ],
         merchant_notification=merchant_notification,
     )
