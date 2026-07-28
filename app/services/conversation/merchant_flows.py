@@ -27,6 +27,7 @@ EDIT_PRODUCT_FLOW = "modifier_produit"
 DELETE_PRODUCT_FLOW = "supprimer_produit"
 PROMOTION_FLOW = "lancer_promotion"
 STOP_PROMOTION_FLOW = "arreter_promotion"
+VIEW_ORDERS_FLOW = "voir_commandes"
 
 _ORDER_COMMAND_RE = re.compile(r"^(CMD-\d{8}-\d{4})\s+(confirmer|livrer|annuler)$", re.IGNORECASE)
 
@@ -62,6 +63,18 @@ _PROMO_MODE_SECTIONS = [
     ANNULER_SECTION,
 ]
 _ADD_ANOTHER_BUTTONS = [("add_more", "Ajouter un autre"), ("done", "Terminé"), ("annuler", "Annuler")]
+
+# Per-order action submenus, keyed by the order's current status. "Retour" (not
+# "Annuler") is the escape button here — "Annuler" is reserved for the "Annuler
+# la commande" action itself, so the two can't be confused with each other.
+_ORDER_ACTIONS_BY_STATUS = {
+    OrderStatus.PENDING: [
+        ("confirm", "Confirmer"), ("cancel_order", "Annuler la commande"), ("back", "Retour"),
+    ],
+    OrderStatus.CONFIRMED: [
+        ("fulfill", "Marquer livrée"), ("cancel_order", "Annuler la commande"), ("back", "Retour"),
+    ],
+}
 
 
 async def _products(db: AsyncSession, business_id: UUID) -> list[Product]:
@@ -231,23 +244,39 @@ async def _sales_summary(db: AsyncSession, business: Business) -> str:
     )
 
 
-async def _pending_orders_message(db: AsyncSession, business: Business) -> str:
-    orders = (
+async def _pending_orders(db: AsyncSession, business_id: UUID) -> list[Order]:
+    return (
         await db.execute(
             select(Order)
-            .where(Order.business_id == business.id, Order.status.in_([OrderStatus.PENDING, OrderStatus.CONFIRMED]))
+            .where(Order.business_id == business_id, Order.status.in_([OrderStatus.PENDING, OrderStatus.CONFIRMED]))
             .order_by(Order.created_at.asc())
         )
     ).scalars().all()
-    if not orders:
-        return "Aucune commande en attente."
-    lines = [
-        f"{o.order_number} — {o.customer_name or '?'} — {int(o.total_xof)} FCFA — {o.status.value}" for o in orders
+
+
+def _pending_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    rows = [
+        (
+            order.order_number,
+            order.order_number,
+            f"{order.customer_name or '?'} — {int(order.total_xof)} FCFA — {order.status.value}",
+        )
+        for order in orders
     ]
-    return (
-        "Commandes en attente :\n" + "\n".join(lines) +
-        "\n\nRépondez '<référence> confirmer' ou '<référence> livrer' pour mettre à jour une commande."
-    )
+    return [("Commandes", rows), ANNULER_SECTION]
+
+
+def _resolve_order(text: str, orders: list[Order]) -> Order | None:
+    stripped = text.strip()
+    if stripped.isdigit():
+        idx = int(stripped)
+        if 1 <= idx <= len(orders):
+            return orders[idx - 1]
+    text_upper = stripped.upper()
+    for order in orders:
+        if order.order_number in text_upper or text_upper in order.order_number:
+            return order
+    return None
 
 
 async def _pending_human_handoffs(db: AsyncSession, business: Business) -> str:
@@ -344,7 +373,15 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
         return with_merchant_menu(await _sales_summary(db, business))
 
     if intent == Intent.VOIR_COMMANDES:
-        return with_merchant_menu(await _pending_orders_message(db, business))
+        orders = await _pending_orders(db, business.id)
+        if not orders:
+            return with_merchant_menu("Aucune commande en attente.")
+        state.start_flow(conversation, VIEW_ORDERS_FLOW)
+        return BotReply(
+            text="Quelle commande souhaitez-vous consulter ?",
+            list_button_text="Choisir",
+            list_sections=_pending_orders_list_sections(orders),
+        )
 
     if intent == Intent.MESSAGES_EN_ATTENTE:
         return with_merchant_menu(await _pending_human_handoffs(db, business))
@@ -364,6 +401,8 @@ async def continue_flow(db: AsyncSession, business: Business, conversation: Conv
         return await _continue_promotion(db, business, conversation, text)
     if flow == STOP_PROMOTION_FLOW:
         return await _continue_stop_promotion(db, business, conversation, text)
+    if flow == VIEW_ORDERS_FLOW:
+        return await _continue_view_orders(db, business, conversation, text)
 
     state.clear_flow(conversation)
     return with_merchant_menu("Que souhaitez-vous faire ?")
@@ -755,6 +794,87 @@ async def _continue_stop_promotion(db: AsyncSession, business: Business, convers
             return with_merchant_menu(f"Promotion arrêtée sur {name}. -- Jaaykat bi")
         state.clear_flow(conversation)
         return with_merchant_menu("D'accord, la promotion continue.")
+
+    state.clear_flow(conversation)
+    return with_merchant_menu("Que souhaitez-vous faire ?")
+
+
+async def _continue_view_orders(db: AsyncSession, business: Business, conversation: Conversation, text: str) -> BotReply:
+    """Step 0: pick an order from the tappable list. Step 1: a submenu of the
+    valid actions for that order's current status. The typed "<ref> action"
+    shorthand still works even while this flow is active (checked first in
+    step 0), so power users aren't forced through the guided picker."""
+    step = state.current_step(conversation)
+    slots = state.current_slots(conversation)
+
+    if step == 0:
+        shortcut_reply = await _handle_order_command(db, business, text)
+        if shortcut_reply is not None:
+            state.clear_flow(conversation)
+            return with_merchant_menu(shortcut_reply)
+
+        orders = await _pending_orders(db, business.id)
+        order = _resolve_order(text, orders)
+        if order is None:
+            if not orders:
+                state.clear_flow(conversation)
+                return with_merchant_menu("Aucune commande en attente.")
+            return BotReply(
+                text="Commande introuvable. Choisissez dans la liste :",
+                list_button_text="Choisir",
+                list_sections=_pending_orders_list_sections(orders),
+            )
+        slots["order_number"] = order.order_number
+        state.advance(conversation, 1, slots)
+        actions = _ORDER_ACTIONS_BY_STATUS.get(order.status, [])
+        return BotReply(
+            text=f"Commande {order.order_number} — {order.customer_name or '?'} — "
+            f"{int(order.total_xof)} FCFA — {order.status.value}. Que souhaitez-vous faire ?",
+            buttons=actions,
+        )
+
+    if step == 1:
+        order = await db.scalar(
+            select(Order).where(Order.business_id == business.id, Order.order_number == slots["order_number"])
+        )
+        if order is None:
+            state.clear_flow(conversation)
+            return with_merchant_menu("Cette commande est introuvable.")
+
+        t = text.strip().lower()
+
+        if "retour" in t:
+            orders = await _pending_orders(db, business.id)
+            if not orders:
+                state.clear_flow(conversation)
+                return with_merchant_menu("Aucune commande en attente.")
+            state.advance(conversation, 0, {})
+            return BotReply(
+                text="Quelle commande souhaitez-vous consulter ?",
+                list_button_text="Choisir",
+                list_sections=_pending_orders_list_sections(orders),
+            )
+
+        if "confirmer" in t and order.status == OrderStatus.PENDING:
+            await confirm_order(order)
+            state.clear_flow(conversation)
+            return with_merchant_menu(f"{order.order_number} marquée comme confirmée.")
+
+        if "livrer" in t and order.status == OrderStatus.CONFIRMED:
+            await fulfill_order(order)
+            state.clear_flow(conversation)
+            return with_merchant_menu(f"{order.order_number} marquée comme livrée. Merci !")
+
+        if "annuler la commande" in t and order.status in (OrderStatus.PENDING, OrderStatus.CONFIRMED):
+            await cancel_order(db, order, reason="Annulée par le marchand via WhatsApp")
+            state.clear_flow(conversation)
+            return with_merchant_menu(f"{order.order_number} a été annulée.")
+
+        actions = _ORDER_ACTIONS_BY_STATUS.get(order.status, [])
+        if not actions:
+            state.clear_flow(conversation)
+            return with_merchant_menu(f"{order.order_number} est déjà {order.status.value}.")
+        return BotReply(text="Que souhaitez-vous faire ?", buttons=actions)
 
     state.clear_flow(conversation)
     return with_merchant_menu("Que souhaitez-vous faire ?")

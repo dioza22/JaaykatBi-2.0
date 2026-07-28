@@ -347,7 +347,7 @@ async def test_sales_summary_single_turn(db_session):
     assert len(_row_titles(reply)) == 9  # menu re-attached after single-turn command
 
 
-async def test_pending_orders_and_order_commands(db_session):
+async def test_pending_orders_typed_shortcut_still_works(db_session):
     business, product, contact, conversation = await _setup(db_session)
     customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
     db_session.add(customer)
@@ -359,10 +359,12 @@ async def test_pending_orders_and_order_commands(db_session):
     )
 
     reply = await _merchant_says(db_session, business, contact, conversation, "mes commandes")
-    assert order.order_number in reply.text
+    assert order.order_number in _row_titles(reply)
 
+    # typed "<ref> action" shorthand works even with the order-list flow active
     reply = await _merchant_says(db_session, business, contact, conversation, f"{order.order_number} confirmer")
     assert "confirmée" in reply.text
+    assert conversation.state.get("flow") is None  # shortcut resolves and exits the flow
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.CONFIRMED
@@ -372,6 +374,76 @@ async def test_pending_orders_and_order_commands(db_session):
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.FULFILLED
+
+
+async def test_pending_orders_guided_list_and_submenu_confirm(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
+    db_session.add(customer)
+    await db_session.flush()
+
+    order = await create_order(
+        db_session, business, customer, product, 1, "Client Test",
+        DeliveryType.PICKUP, None, PaymentMethod.CASH,
+    )
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "mes commandes")
+    assert order.order_number in _row_titles(reply)
+    assert "Annuler" in _row_titles(reply)  # universal escape row, distinct from "Annuler la commande"
+
+    reply = await _merchant_says(db_session, business, contact, conversation, order.order_number)
+    assert set(_button_titles(reply)) == {"Confirmer", "Annuler la commande", "Retour"}
+    assert order.order_number in reply.text
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Confirmer")
+    assert "confirmée" in reply.text
+    assert conversation.state.get("flow") is None
+    await db_session.flush()
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.CONFIRMED
+
+
+async def test_pending_orders_submenu_cancel_order_action(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
+    db_session.add(customer)
+    await db_session.flush()
+
+    order = await create_order(
+        db_session, business, customer, product, 1, "Client Test",
+        DeliveryType.PICKUP, None, PaymentMethod.CASH,
+    )
+
+    await _merchant_says(db_session, business, contact, conversation, "mes commandes")
+    await _merchant_says(db_session, business, contact, conversation, order.order_number)
+    reply = await _merchant_says(db_session, business, contact, conversation, "Annuler la commande")
+    assert "a été annulée" in reply.text
+
+    await db_session.flush()
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.CANCELLED
+    await db_session.refresh(product)
+    assert product.quantity_in_stock == 10  # stock restored
+
+
+async def test_pending_orders_retour_goes_back_to_the_list(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
+    db_session.add(customer)
+    await db_session.flush()
+
+    order = await create_order(
+        db_session, business, customer, product, 1, "Client Test",
+        DeliveryType.PICKUP, None, PaymentMethod.CASH,
+    )
+
+    await _merchant_says(db_session, business, contact, conversation, "mes commandes")
+    await _merchant_says(db_session, business, contact, conversation, order.order_number)
+    reply = await _merchant_says(db_session, business, contact, conversation, "Retour")
+
+    assert order.order_number in _row_titles(reply)
+    assert conversation.state["step"] == 0  # back at the list, flow still active
+    assert conversation.state["flow"] == "voir_commandes"
 
 
 async def test_catalog_view_groups_by_category_with_stock_numbers(db_session):
