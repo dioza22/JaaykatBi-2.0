@@ -18,6 +18,12 @@ class BotReply:
     list_button_text: str | None = None
     list_sections: list[tuple[str, list[tuple[str, str, str]]]] | None = None
     # [(section_title, [(row_id, row_title, row_description)])]
+    merchant_notification: str | None = None
+    # Set when the customer-side reply should also trigger a separate WhatsApp
+    # message to the merchant (e.g. a new pending order needs their
+    # attention) — message_handler.py sends this to business.owner_whatsapp_number
+    # once it's done sending the main `text` reply to whoever it's actually
+    # replying to.
 
 
 # Appended to every list-based prompt (product pickers, and any bounded
@@ -49,7 +55,7 @@ def with_merchant_menu(text: str) -> BotReply:
     return BotReply(text=text, list_button_text="Menu", list_sections=MERCHANT_MENU_SECTIONS)
 
 
-def with_customer_menu(text: str) -> BotReply:
+def with_customer_menu(text: str, merchant_notification: str | None = None) -> BotReply:
     return BotReply(
         text=text,
         buttons=[
@@ -57,6 +63,7 @@ def with_customer_menu(text: str) -> BotReply:
             ("voir_promotions", "Promotions"),
             ("commander_produit", "Commander"),
         ],
+        merchant_notification=merchant_notification,
     )
 
 

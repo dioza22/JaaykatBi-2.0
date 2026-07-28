@@ -236,9 +236,18 @@ async def continue_order_flow(
                 state.clear_flow(conversation)
                 return with_customer_menu(f"{exc} Votre commande n'a pas pu être enregistrée. -- Jaaykat bi")
             state.clear_flow(conversation)
+            delivery_line = (
+                "retrait en boutique" if order.delivery_type == DeliveryType.PICKUP
+                else f"livraison à {order.delivery_address}"
+            )
+            merchant_notification = (
+                f"🔔 Nouvelle commande {order.order_number} de {order.customer_name} — "
+                f"{int(order.total_xof)} FCFA ({delivery_line}). Répondez 'mes commandes' pour la traiter."
+            )
             return with_customer_menu(
                 f"Votre commande a été enregistrée sous la référence {order.order_number}. "
-                f"Merci pour votre confiance. -- Jaaykat bi"
+                f"Merci pour votre confiance. -- Jaaykat bi",
+                merchant_notification=merchant_notification,
             )
         return BotReply(text="Souhaitez-vous confirmer votre commande ?", buttons=_CONFIRM_BUTTONS)
 

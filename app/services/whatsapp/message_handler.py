@@ -75,21 +75,23 @@ async def _get_or_create_business(db: AsyncSession, inbound: InboundMessage) -> 
     return await db.scalar(select(Business).where(Business.whatsapp_number == number))
 
 
-async def _get_or_create_contact(db: AsyncSession, business: Business, inbound: InboundMessage) -> Contact:
+async def _get_or_create_contact(
+    db: AsyncSession, business: Business, wa_id: str, contact_name: str | None = None
+) -> Contact:
     contact = await db.scalar(
-        select(Contact).where(Contact.business_id == business.id, Contact.wa_id == inbound.wa_id)
+        select(Contact).where(Contact.business_id == business.id, Contact.wa_id == wa_id)
     )
     if contact:
-        if inbound.contact_name and not contact.display_name:
-            contact.display_name = inbound.contact_name
+        if contact_name and not contact.display_name:
+            contact.display_name = contact_name
         contact.update_last_contact()
         return contact
 
     contact = Contact(
         business_id=business.id,
-        wa_id=inbound.wa_id,
-        phone_number=inbound.wa_id,
-        display_name=inbound.contact_name,
+        wa_id=wa_id,
+        phone_number=wa_id,
+        display_name=contact_name,
         last_contact_at=datetime.now(UTC),
     )
     db.add(contact)
@@ -138,7 +140,7 @@ async def _handle_inbound(db: AsyncSession, whatsapp_client: WhatsAppClient, inb
         )
         return  # unknown business number — nothing we can do
 
-    contact = await _get_or_create_contact(db, business, inbound)
+    contact = await _get_or_create_contact(db, business, inbound.wa_id, inbound.contact_name)
     conversation = await _get_or_create_conversation(db, business, contact)
 
     db.add(
@@ -181,3 +183,31 @@ async def _handle_inbound(db: AsyncSession, whatsapp_client: WhatsAppClient, inb
                 await whatsapp_client.send_text(contact.wa_id, reply.text)
         except Exception:
             logger.warning("sending reply failed for conversation %s", conversation.id, exc_info=True)
+
+    if reply and reply.merchant_notification:
+        await _notify_merchant(db, whatsapp_client, business, reply.merchant_notification)
+
+
+async def _notify_merchant(db: AsyncSession, whatsapp_client: WhatsAppClient, business: Business, text: str) -> None:
+    """A separate, proactive WhatsApp message to the merchant — e.g. a new
+    pending order needs their attention — independent of whatever reply just
+    went to the customer. Logged into the merchant's own conversation so it
+    shows up in their history (and the LLM fallback's context) too."""
+    if not business.owner_whatsapp_number:
+        return
+    merchant_contact = await _get_or_create_contact(db, business, business.owner_whatsapp_number)
+    merchant_conversation = await _get_or_create_conversation(db, business, merchant_contact)
+    db.add(
+        Message(
+            conversation_id=merchant_conversation.id,
+            direction=MessageDirection.OUTBOUND,
+            content=text,
+            was_ai_generated=False,
+        )
+    )
+    merchant_conversation.message_count += 1
+    merchant_conversation.last_message_at = datetime.now(UTC)
+    try:
+        await whatsapp_client.send_text(business.owner_whatsapp_number, text)
+    except Exception:
+        logger.warning("merchant notification send failed for business %s", business.id, exc_info=True)

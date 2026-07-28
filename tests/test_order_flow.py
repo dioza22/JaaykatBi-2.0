@@ -72,6 +72,10 @@ async def test_full_order_flow_creates_order_and_deducts_stock(db_session):
     reply = await handle_message(db_session, business, contact, conversation, "confirmer", is_merchant=False)
     assert "référence CMD-" in reply.text
     assert "Commander" in _button_titles(reply)  # customer menu re-attached
+    assert reply.merchant_notification is not None
+    assert "Nouvelle commande" in reply.merchant_notification
+    assert "Amadou Fall" in reply.merchant_notification
+    assert "9000" in reply.merchant_notification
 
     order = (await db_session.execute(select(Order).where(Order.business_id == business.id))).scalar_one()
     assert order.status == OrderStatus.PENDING
