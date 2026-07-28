@@ -16,7 +16,7 @@ from app.models import (
 )
 from app.services.conversation import engine, state
 from app.services.conversation.engine import handle_message
-from app.services.orders.service import create_order
+from app.services.orders.service import confirm_order, create_order
 
 pytestmark = pytest.mark.asyncio
 
@@ -401,6 +401,38 @@ async def test_pending_orders_guided_list_and_submenu_confirm(db_session):
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.CONFIRMED
+
+
+async def test_pending_orders_submenu_fulfill_action_via_button_tap(db_session):
+    # Regression test: the submenu button is titled "Marquer livrée" (past
+    # participle) — a match on the substring "livrer" (infinitive) never
+    # fires for that title, so the tap silently did nothing. Only the typed
+    # "<ref> livrer" shortcut exercised the "livrer" substring, which is why
+    # this slipped through before.
+    business, product, contact, conversation = await _setup(db_session)
+    customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
+    db_session.add(customer)
+    await db_session.flush()
+
+    order = await create_order(
+        db_session, business, customer, product, 1, "Client Test",
+        DeliveryType.PICKUP, None, PaymentMethod.CASH,
+    )
+    await confirm_order(order)
+    await db_session.flush()
+
+    await _merchant_says(db_session, business, contact, conversation, "mes commandes")
+    reply = await _merchant_says(db_session, business, contact, conversation, order.order_number)
+    assert set(_button_titles(reply)) == {"Marquer livrée", "Annuler la commande", "Retour"}
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "Marquer livrée")
+    assert "livrée" in reply.text
+    assert conversation.state.get("flow") is None
+
+    await db_session.flush()
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.FULFILLED
+    assert order.fulfilled_at is not None
 
 
 async def test_pending_orders_submenu_cancel_order_action(db_session):

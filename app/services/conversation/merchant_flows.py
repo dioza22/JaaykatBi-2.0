@@ -860,7 +860,7 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
             state.clear_flow(conversation)
             return with_merchant_menu(f"{order.order_number} marquée comme confirmée.")
 
-        if "livrer" in t and order.status == OrderStatus.CONFIRMED:
+        if "livr" in t and order.status == OrderStatus.CONFIRMED:  # matches "livrer" (typed) and "livrée" (button)
             await fulfill_order(order)
             state.clear_flow(conversation)
             return with_merchant_menu(f"{order.order_number} marquée comme livrée. Merci !")
