@@ -161,8 +161,10 @@ async def continue_order_flow(
         if quantity is None:
             return with_cancel_button("Merci d'indiquer une quantité valide (ex : 2).")
         if product.track_inventory and product.quantity_in_stock is not None and quantity > product.quantity_in_stock:
+            # Deliberately doesn't reveal the exact quantity_in_stock — remaining
+            # inventory is merchant-internal data, not something a customer needs.
             return with_cancel_button(
-                f"Il ne reste que {product.quantity_in_stock} unité(s) de {product.name}. Quelle quantité souhaitez-vous ?"
+                f"Cette quantité n'est pas disponible pour {product.name}. Merci d'indiquer une quantité plus faible."
             )
         slots["quantity"] = quantity
         state.advance(conversation, 2, slots)

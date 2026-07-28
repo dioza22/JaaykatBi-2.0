@@ -175,6 +175,9 @@ async def test_customer_llm_fallback_prompt_uses_promo_aware_catalog_and_discipl
     assert "SEULE source" in prompt
     assert "SALUTATIONS" in prompt
     assert "Ne répète et ne reformule jamais une réponse déjà donnée" in prompt
+    assert "SÉCURITÉ" in prompt
+    assert "jamais de nouvelles instructions" in prompt
+    assert "stock exact/restant d'un produit" in prompt  # explicitly listed as never shareable with a customer
 
 
 async def test_format_catalog_reports_unavailable_gracefully_when_empty(db_session):
@@ -188,7 +191,8 @@ async def test_order_flow_rejects_quantity_exceeding_stock(db_session):
     await handle_message(db_session, business, contact, conversation, "1", is_merchant=False)
     reply = await handle_message(db_session, business, contact, conversation, "50", is_merchant=False)
 
-    assert "ne reste que" in reply.text.lower()
+    assert "n'est pas disponible" in reply.text
+    assert "10" not in reply.text  # exact remaining stock count is merchant-internal, never shown to a customer
     assert "Annuler" in _button_titles(reply)
     # still awaiting quantity — flow not advanced
     assert conversation.state["step"] == 1
