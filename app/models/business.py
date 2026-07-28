@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import Boolean, DateTime, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +31,12 @@ class Business(Base):
     away_message: Mapped[str | None] = mapped_column(String(1000))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Merchant-configurable % fee for customer-initiated cancellations that
+    # fall outside the free window (see Order — free only if still PENDING
+    # and under 24h old). 0 means no fee is charged, just disclosed as
+    # "outside the free window" with no monetary amount.
+    late_cancellation_fee_percent: Mapped[int] = mapped_column(Integer, default=0)
 
     products: Mapped[list["Product"]] = relationship(back_populates="business")  # noqa: F821
     contacts: Mapped[list["Contact"]] = relationship(back_populates="business")  # noqa: F821

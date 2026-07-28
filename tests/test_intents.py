@@ -19,6 +19,8 @@ from app.services.conversation.intents import Intent, detect_intent
         ("Je veux ajouter un produit", True, Intent.AJOUTER_PRODUIT),
         ("Montre-moi mes ventes", True, Intent.CONSULTER_VENTES),
         ("Je veux lancer une promotion", True, Intent.LANCER_PROMOTION),
+        ("Je veux voir mes commandes", False, Intent.MES_COMMANDES_CLIENT),
+        ("Je veux définir des frais d'annulation", True, Intent.DEFINIR_FRAIS_ANNULATION),
     ],
 )
 def test_detect_intent(text, is_merchant, expected):

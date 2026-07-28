@@ -70,8 +70,8 @@ async def test_customer_return_request_flow_notifies_merchant(db_session):
     order = await _make_fulfilled_order(db_session, business, product, customer)
 
     reply = await _customer_says(db_session, business, customer, customer_conv, "je veux un remboursement")
-    assert order.order_number in _row_titles(reply)
-    assert "Annuler" in _row_titles(reply)
+    assert "numéro" in reply.text.lower()  # no list shown — customer must type their own order number
+    assert "Annuler" in _button_titles(reply)
 
     reply = await _customer_says(db_session, business, customer, customer_conv, order.order_number)
     assert "confirmez-vous" in reply.text.lower()
@@ -106,6 +106,18 @@ async def test_customer_return_request_with_no_fulfilled_orders(db_session):
     reply = await _customer_says(db_session, business, customer, customer_conv, "je veux un remboursement")
     assert "n'avez pas de commande" in reply.text.lower()
     assert customer_conv.state.get("flow") is None
+
+
+async def test_customer_return_request_rejects_wrong_order_number(db_session):
+    business, product, customer, customer_conv, _mc, _mconv = await _setup(db_session)
+    await _make_fulfilled_order(db_session, business, product, customer)
+
+    await _customer_says(db_session, business, customer, customer_conv, "je veux un remboursement")
+    reply = await _customer_says(db_session, business, customer, customer_conv, "CMD-99999999-9999")
+
+    assert "introuvable" in reply.text.lower()
+    assert customer_conv.state["flow"] == "demander_retour"  # still in the flow, can retry
+    assert customer_conv.state["step"] == 0
 
 
 async def test_merchant_orders_list_grouped_by_status_with_fulfilled_last(db_session):

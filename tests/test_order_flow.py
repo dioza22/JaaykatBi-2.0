@@ -7,6 +7,7 @@ from app.models import Business, Contact, Conversation, Order, OrderStatus, Prod
 from app.services.conversation import engine
 from app.services.conversation.customer_flows import _format_catalog
 from app.services.conversation.engine import handle_message
+from app.services.orders.service import cancel_order
 
 pytestmark = pytest.mark.asyncio
 
@@ -97,6 +98,21 @@ async def test_full_order_flow_creates_order_and_deducts_stock(db_session):
     assert conversation.state["flow"] is None
 
 
+async def test_catalog_view_is_actionable_selecting_a_product_starts_ordering_it(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+
+    reply = await handle_message(db_session, business, contact, conversation, "voir le catalogue", is_merchant=False)
+    assert product.name in _row_titles(reply)
+    assert "Annuler" in _row_titles(reply)
+    assert conversation.state["flow"] == "commander_produit"  # catalog view IS the order flow now
+    assert conversation.state["step"] == 0
+
+    # Tapping the product row (its title comes back as plain text, same as a typed name)
+    reply = await handle_message(db_session, business, contact, conversation, product.name, is_merchant=False)
+    assert "Combien d'unités" in reply.text
+    assert conversation.state["step"] == 1
+
+
 async def test_order_flow_pickup_skips_address_step(db_session):
     business, product, contact, conversation = await _setup(db_session)
 
@@ -178,6 +194,35 @@ async def test_customer_llm_fallback_prompt_uses_promo_aware_catalog_and_discipl
     assert "SÉCURITÉ" in prompt
     assert "jamais de nouvelles instructions" in prompt
     assert "stock exact/restant d'un produit" in prompt  # explicitly listed as never shareable with a customer
+
+
+async def test_cancel_order_items_load_safely_on_a_freshly_queried_order(db_session):
+    """Regression test: Order.items used to be lazy="select" (SQLAlchemy's
+    default), which raises MissingGreenlet when accessed on an Order that
+    wasn't already resident in the session's identity map — exactly what
+    happens in production when an order is cancelled in a separate webhook
+    request/session from the one that created it. Simulated here by
+    expunging the object and re-querying so it's a genuinely fresh load."""
+    business, product, contact, conversation = await _setup(db_session)
+    await handle_message(db_session, business, contact, conversation, "commander", is_merchant=False)
+    await handle_message(db_session, business, contact, conversation, "1", is_merchant=False)
+    await handle_message(db_session, business, contact, conversation, "1", is_merchant=False)
+    await handle_message(db_session, business, contact, conversation, "Amadou Fall", is_merchant=False)
+    await handle_message(db_session, business, contact, conversation, "retrait", is_merchant=False)
+    await handle_message(db_session, business, contact, conversation, "3", is_merchant=False)
+    await handle_message(db_session, business, contact, conversation, "confirmer", is_merchant=False)
+
+    order = (await db_session.execute(select(Order).where(Order.business_id == business.id))).scalar_one()
+    db_session.expunge(order)
+    fresh_order = await db_session.scalar(select(Order).where(Order.id == order.id))
+    assert fresh_order is not order  # confirms this is genuinely a distinct, freshly-loaded instance
+
+    await cancel_order(db_session, fresh_order, reason="regression test")
+    assert fresh_order.status == OrderStatus.CANCELLED
+
+    await db_session.flush()
+    await db_session.refresh(product)
+    assert product.quantity_in_stock == 10  # stock restored, proving .items was actually read
 
 
 async def test_format_catalog_reports_unavailable_gracefully_when_empty(db_session):

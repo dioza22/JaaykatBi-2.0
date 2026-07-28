@@ -59,22 +59,32 @@ async def _customer_order_status(db: AsyncSession, business: Business, contact: 
 
 
 async def _customer_cancel_order(db: AsyncSession, business: Business, contact: Contact) -> str:
+    """Single-turn convenience path for the common case (still free to
+    cancel). A late/post-confirmation cancellation needs the merchant's fee
+    disclosed and confirmed first, which a one-shot text reply can't do —
+    that case is redirected to the guided "mes commandes" flow instead,
+    which already handles the disclosure + confirm step."""
     order = await db.scalar(
         select(Order)
         .where(
             Order.business_id == business.id,
             Order.contact_id == contact.id,
-            Order.status == OrderStatus.PENDING,
+            Order.status.in_([OrderStatus.PENDING, OrderStatus.CONFIRMED]),
         )
         .order_by(Order.created_at.desc())
     )
     if order is None:
         return (
-            "Je ne trouve pas de commande annulable (déjà confirmée ou aucune commande en cours). "
+            "Je ne trouve pas de commande annulable (déjà résolue ou aucune commande en cours). "
             "Contactez-nous directement si besoin."
         )
-    await cancel_order(db, order, reason="Annulée par le client via WhatsApp")
-    return f"Votre commande {order.order_number} a été annulée. -- Jaaykat bi"
+    if order.is_freely_cancellable():
+        await cancel_order(db, order, reason="Annulée par le client via WhatsApp")
+        return f"Votre commande {order.order_number} a été annulée. -- Jaaykat bi"
+    return (
+        f"Votre commande {order.order_number} ne peut plus être annulée gratuitement (délai de 24h dépassé ou "
+        f"déjà confirmée). Répondez 'mes commandes' pour voir les détails et confirmer l'annulation."
+    )
 
 
 def _handoff_message(business: Business) -> str:
@@ -144,7 +154,7 @@ async def handle_message(
 
     if intent == Intent.VOIR_CATALOGUE:
         state.reset_unknown_streak(conversation)
-        return await customer_flows.catalog_message(db, business)
+        return await customer_flows.catalog_message(db, business, conversation)
 
     if intent == Intent.VOIR_PROMOTIONS:
         state.reset_unknown_streak(conversation)
@@ -165,6 +175,10 @@ async def handle_message(
     if intent == Intent.DEMANDER_RETOUR:
         state.reset_unknown_streak(conversation)
         return await customer_flows.start_return_flow(db, contact, conversation)
+
+    if intent == Intent.MES_COMMANDES_CLIENT:
+        state.reset_unknown_streak(conversation)
+        return await customer_flows.start_my_orders_flow(db, contact, conversation)
 
     if intent == Intent.PARLER_A_QUELQUUN:
         state.set_needs_human(conversation, True)

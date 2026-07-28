@@ -83,7 +83,7 @@ async def test_add_product_flow_creates_product(db_session):
 
     reply = await _merchant_says(db_session, business, contact, conversation, "confirmer")
     assert "ajouté au catalogue" in reply.text
-    assert len(_row_titles(reply)) == 9  # merchant menu re-attached
+    assert len(_row_titles(reply)) == 10  # merchant menu re-attached
 
     product = await db_session.scalar(select(Product).where(Product.name == "Huile d'arachide 1L"))
     assert product is not None
@@ -327,7 +327,7 @@ async def test_merchant_flow_can_be_cancelled_mid_flow(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, "annuler")
     assert "annulé" in reply.text.lower()
     assert conversation.state["flow"] is None
-    assert len(_row_titles(reply)) == 9  # merchant menu re-attached
+    assert len(_row_titles(reply)) == 10  # merchant menu re-attached
 
 
 async def test_sales_summary_single_turn(db_session):
@@ -344,7 +344,7 @@ async def test_sales_summary_single_turn(db_session):
     reply = await _merchant_says(db_session, business, contact, conversation, "mes ventes")
     assert "Aujourd'hui" in reply.text
     assert "4500" in reply.text
-    assert len(_row_titles(reply)) == 9  # menu re-attached after single-turn command
+    assert len(_row_titles(reply)) == 10  # menu re-attached after single-turn command
 
 
 async def test_pending_orders_typed_shortcut_still_works(db_session):
@@ -498,7 +498,43 @@ async def test_catalog_view_groups_by_category_with_stock_numbers(db_session):
     assert "Stock actuel : 10 / initial : 20" in reply.text
     assert "Savon karité" in reply.text
     assert "Stock non suivi" in reply.text
-    assert len(_row_titles(reply)) == 9  # menu re-attached
+    assert len(_row_titles(reply)) == 10  # menu re-attached
+
+
+async def test_cancellation_fee_setup_flow(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    assert business.late_cancellation_fee_percent == 0
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "définir des frais d'annulation")
+    assert "0%" in reply.text
+    assert "Annuler" in _button_titles(reply)
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "10")
+    assert "10%" in reply.text
+    assert conversation.state.get("flow") is None
+    assert business.late_cancellation_fee_percent == 10
+
+
+async def test_cancellation_fee_setup_rejects_invalid_percent(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+
+    await _merchant_says(db_session, business, contact, conversation, "définir des frais d'annulation")
+    reply = await _merchant_says(db_session, business, contact, conversation, "150")
+
+    assert "valide" in reply.text.lower()
+    assert conversation.state.get("flow") == "definir_frais_annulation"  # still in the flow
+
+
+async def test_cancellation_fee_setup_can_disable_fee(db_session):
+    business, product, contact, conversation = await _setup(db_session)
+    business.late_cancellation_fee_percent = 15
+    await db_session.flush()
+
+    await _merchant_says(db_session, business, contact, conversation, "définir des frais d'annulation")
+    reply = await _merchant_says(db_session, business, contact, conversation, "0")
+
+    assert "désactivés" in reply.text.lower()
+    assert business.late_cancellation_fee_percent == 0
 
 
 async def test_messages_en_attente_lists_flagged_conversations(db_session):
@@ -535,7 +571,7 @@ async def test_merchant_unmatched_question_falls_back_to_llm(db_session, monkeyp
         db_session, business, contact, conversation, "Quel est mon produit le plus cher ?"
     )
     assert "4500 FCFA" in reply.text
-    assert len(_row_titles(reply)) == 9  # menu re-attached, same as every other merchant reply
+    assert len(_row_titles(reply)) == 10  # menu re-attached, same as every other merchant reply
     assert "Riz parfumé 5 kg" in captured_prompt["value"]  # catalog context reached the LLM
     assert conversation.state.get("flow") is None  # this is a plain Q&A, not a flow
 
@@ -581,4 +617,4 @@ async def test_merchant_llm_fallback_failure_gives_a_plain_retry_message(db_sess
 
     reply = await _merchant_says(db_session, business, contact, conversation, "Quel est mon produit le plus cher ?")
     assert "reformuler" in reply.text.lower()
-    assert len(_row_titles(reply)) == 9
+    assert len(_row_titles(reply)) == 10

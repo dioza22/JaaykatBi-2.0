@@ -23,6 +23,8 @@ class Intent(str, enum.Enum):
     VOIR_COMMANDES = "voir_commandes"
     MESSAGES_EN_ATTENTE = "messages_en_attente"
     DEMANDER_RETOUR = "demander_retour"
+    MES_COMMANDES_CLIENT = "mes_commandes_client"
+    DEFINIR_FRAIS_ANNULATION = "definir_frais_annulation"
     UNKNOWN = "unknown"
 
 
@@ -42,6 +44,9 @@ _CUSTOMER_KEYWORDS: dict[Intent, list[str]] = {
         "retourner ma commande", "faire un retour", "demander un remboursement",
         "je veux un remboursement", "renvoyer ma commande",
     ],
+    Intent.MES_COMMANDES_CLIENT: [
+        "mes commandes", "voir mes commandes", "liste de mes commandes", "commandes en cours",
+    ],
     Intent.ANNULER_COMMANDE: ["annuler", "annulation"],
     Intent.STATUT_COMMANDE: ["statut", "où en est", "suivi de ma commande"],
     Intent.PARLER_A_QUELQUUN: ["parler à quelqu'un", "un humain", "une vraie personne", "assistance humaine"],
@@ -60,6 +65,10 @@ _MERCHANT_KEYWORDS: dict[Intent, list[str]] = {
     Intent.ARRETER_PROMOTION: ["arrêter une promotion", "arreter une promotion", "terminer une promotion", "stopper une promotion"],
     Intent.VOIR_COMMANDES: ["mes commandes", "commandes en attente", "voir les commandes"],
     Intent.MESSAGES_EN_ATTENTE: ["messages en attente", "conversations en attente"],
+    Intent.DEFINIR_FRAIS_ANNULATION: [
+        "frais d'annulation", "définir des frais d'annulation", "configurer les frais d'annulation",
+        "frais d'annulation tardive",
+    ],
 }
 
 # Price questions are redirected to the catalog rather than treated as a

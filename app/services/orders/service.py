@@ -54,9 +54,11 @@ async def create_order(
     if product.track_inventory and not product.is_in_stock():
         raise InsufficientStockError(f"{product.name} est en rupture de stock.")
     if product.track_inventory and product.quantity_in_stock is not None and quantity > product.quantity_in_stock:
-        raise InsufficientStockError(
-            f"Il ne reste que {product.quantity_in_stock} unité(s) de {product.name}."
-        )
+        # Doesn't reveal the exact quantity_in_stock — merchant-internal data,
+        # never surfaced to a customer (see continue_order_flow's own
+        # proactive check for the same rule; this is the race-condition
+        # fallback for stock that changed between that check and confirmation).
+        raise InsufficientStockError(f"Cette quantité n'est plus disponible pour {product.name}.")
 
     unit_price = await effective_price(db, product)
 
@@ -88,12 +90,35 @@ async def fulfill_order(order: Order) -> None:
     order.fulfill()
 
 
-async def cancel_order(db: AsyncSession, order: Order, reason: str | None = None) -> None:
+async def cancel_order(
+    db: AsyncSession, order: Order, reason: str | None = None, fee_xof: float | None = None
+) -> None:
     for item in order.items:
         product = await db.get(Product, item.product_id)
         if product and product.track_inventory and product.quantity_in_stock is not None:
             product.quantity_in_stock += item.quantity
-    order.cancel(reason)
+    order.cancel(reason, fee_xof=fee_xof)
+
+
+async def update_order_quantity(db: AsyncSession, order: Order, contact: Contact, new_quantity: int) -> None:
+    """Customer-initiated quantity change on an order that hasn't shipped yet.
+    Keeps the originally-quoted unit price (a promo that started/ended since
+    the order was placed shouldn't retroactively change what was agreed),
+    just recomputes stock, the item/order totals, and the contact's spend."""
+    item = order.items[0]
+    product = await db.get(Product, item.product_id)
+    delta = new_quantity - item.quantity
+    if product.track_inventory and product.quantity_in_stock is not None and delta > 0 and delta > product.quantity_in_stock:
+        raise InsufficientStockError(f"Cette quantité n'est pas disponible pour {product.name}.")
+
+    if product.track_inventory and product.quantity_in_stock is not None:
+        product.quantity_in_stock -= delta
+
+    old_item_total = float(item.total_price_xof)
+    item.quantity = new_quantity
+    item.total_price_xof = float(item.unit_price_xof) * new_quantity
+    order.calculate_total()
+    contact.total_spent_xof = float(contact.total_spent_xof or 0) + (float(item.total_price_xof) - old_item_total)
 
 
 async def accept_return(order: Order) -> None:

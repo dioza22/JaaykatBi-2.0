@@ -36,6 +36,7 @@ DELETE_PRODUCT_FLOW = "supprimer_produit"
 PROMOTION_FLOW = "lancer_promotion"
 STOP_PROMOTION_FLOW = "arreter_promotion"
 VIEW_ORDERS_FLOW = "voir_commandes"
+CANCELLATION_FEE_FLOW = "definir_frais_annulation"
 
 _ORDER_COMMAND_RE = re.compile(r"^(CMD-\d{8}-\d{4})\s+(confirmer|livrer|annuler)$", re.IGNORECASE)
 
@@ -420,6 +421,14 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
     if intent == Intent.MESSAGES_EN_ATTENTE:
         return with_merchant_menu(await _pending_human_handoffs(db, business))
 
+    if intent == Intent.DEFINIR_FRAIS_ANNULATION:
+        state.start_flow(conversation, CANCELLATION_FEE_FLOW)
+        current = business.late_cancellation_fee_percent or 0
+        return with_cancel_button(
+            f"Frais d'annulation tardive actuels : {current}%. Quel nouveau pourcentage souhaitez-vous "
+            f"appliquer pour une annulation hors délai (0 pour aucun frais) ?"
+        )
+
     return None
 
 
@@ -437,6 +446,8 @@ async def continue_flow(db: AsyncSession, business: Business, conversation: Conv
         return await _continue_stop_promotion(db, business, conversation, text)
     if flow == VIEW_ORDERS_FLOW:
         return await _continue_view_orders(db, business, conversation, text)
+    if flow == CANCELLATION_FEE_FLOW:
+        return await _continue_cancellation_fee_setup(db, business, conversation, text)
 
     state.clear_flow(conversation)
     return with_merchant_menu("Que souhaitez-vous faire ?")
@@ -931,3 +942,21 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
 
     state.clear_flow(conversation)
     return with_merchant_menu("Que souhaitez-vous faire ?")
+
+
+async def _continue_cancellation_fee_setup(
+    db: AsyncSession, business: Business, conversation: Conversation, text: str
+) -> BotReply:
+    match = re.search(r"\d+", text)
+    percent = int(match.group()) if match else None
+    if percent is None or not (0 <= percent <= 100):
+        return with_cancel_button("Merci d'indiquer un pourcentage valide entre 0 et 100 (ex : 10).")
+
+    business.late_cancellation_fee_percent = percent
+    state.clear_flow(conversation)
+    if percent == 0:
+        return with_merchant_menu("Les frais d'annulation tardive ont été désactivés. -- Jaaykat bi")
+    return with_merchant_menu(
+        f"Les frais d'annulation tardive sont désormais de {percent}% (appliqués aux annulations hors du "
+        f"délai gratuit de 24h ou après confirmation). -- Jaaykat bi"
+    )
