@@ -565,6 +565,7 @@ async def test_merchant_llm_fallback_prompt_carries_analytics_and_greeting_rule(
     assert "expert en marketing et analyste de données" in prompt
     assert "SEULE source de chiffres" in prompt
     assert "SALUTATIONS" in prompt
+    assert "ne reformule jamais une réponse déjà donnée" in prompt
     assert "4500 FCFA" in prompt  # today's revenue, sourced from the DB via build_merchant_analytics
 
 
