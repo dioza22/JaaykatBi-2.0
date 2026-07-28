@@ -94,3 +94,11 @@ async def cancel_order(db: AsyncSession, order: Order, reason: str | None = None
         if product and product.track_inventory and product.quantity_in_stock is not None:
             product.quantity_in_stock += item.quantity
     order.cancel(reason)
+
+
+async def accept_return(order: Order) -> None:
+    order.accept_return()
+
+
+async def dismiss_return_request(order: Order) -> None:
+    order.dismiss_return_request()

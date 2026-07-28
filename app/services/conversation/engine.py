@@ -52,6 +52,7 @@ async def _customer_order_status(db: AsyncSession, business: Business, contact: 
         OrderStatus.CONFIRMED: "confirmée, en préparation",
         OrderStatus.FULFILLED: "livrée/récupérée",
         OrderStatus.CANCELLED: "annulée",
+        OrderStatus.RETURNED: "retournée / remboursée",
     }
     return f"Votre commande {order.order_number} est {status_labels[order.status]}."
 
@@ -122,7 +123,7 @@ async def handle_message(
     if active_flow:
         if is_merchant:
             return await merchant_flows.continue_flow(db, business, conversation, text)
-        return await customer_flows.continue_order_flow(db, business, contact, conversation, text)
+        return await customer_flows.continue_flow(db, business, contact, conversation, text)
 
     if is_merchant:
         reply = await merchant_flows.handle_intent(db, business, conversation, text)
@@ -159,6 +160,10 @@ async def handle_message(
     if intent == Intent.ANNULER_COMMANDE:
         state.reset_unknown_streak(conversation)
         return with_customer_menu(await _customer_cancel_order(db, business, contact))
+
+    if intent == Intent.DEMANDER_RETOUR:
+        state.reset_unknown_streak(conversation)
+        return await customer_flows.start_return_flow(db, contact, conversation)
 
     if intent == Intent.PARLER_A_QUELQUUN:
         state.set_needs_human(conversation, True)

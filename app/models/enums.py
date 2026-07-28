@@ -36,6 +36,7 @@ class OrderStatus(str, enum.Enum):
     CONFIRMED = "confirmed"
     FULFILLED = "fulfilled"
     CANCELLED = "cancelled"
+    RETURNED = "returned"
 
 
 class DeliveryType(str, enum.Enum):

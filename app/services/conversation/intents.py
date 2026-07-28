@@ -22,6 +22,7 @@ class Intent(str, enum.Enum):
     ARRETER_PROMOTION = "arreter_promotion"
     VOIR_COMMANDES = "voir_commandes"
     MESSAGES_EN_ATTENTE = "messages_en_attente"
+    DEMANDER_RETOUR = "demander_retour"
     UNKNOWN = "unknown"
 
 
@@ -37,6 +38,10 @@ _CUSTOMER_KEYWORDS: dict[Intent, list[str]] = {
     # Most specific intents first — COMMANDER_PRODUIT's keywords are broad
     # enough ("commander" etc.) that a generic word checked late would never
     # get a chance to win against a more specific phrase checked earlier.
+    Intent.DEMANDER_RETOUR: [
+        "retourner ma commande", "faire un retour", "demander un remboursement",
+        "je veux un remboursement", "renvoyer ma commande",
+    ],
     Intent.ANNULER_COMMANDE: ["annuler", "annulation"],
     Intent.STATUT_COMMANDE: ["statut", "où en est", "suivi de ma commande"],
     Intent.PARLER_A_QUELQUUN: ["parler à quelqu'un", "un humain", "une vraie personne", "assistance humaine"],

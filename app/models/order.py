@@ -43,6 +43,10 @@ class Order(Base):
     fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancellation_reason: Mapped[str | None] = mapped_column(String(500))
+    # Set by the customer requesting a return/refund on a FULFILLED order;
+    # left in place (as a "when was it requested" record) even after the
+    # merchant resolves it via accept_return()/dismiss_return_request().
+    return_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     items: Mapped[list["OrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
     business: Mapped["Business"] = relationship()  # noqa: F821
@@ -64,6 +68,15 @@ class Order(Base):
         self.status = OrderStatus.CANCELLED
         self.cancelled_at = datetime.now(UTC)
         self.cancellation_reason = reason
+
+    def request_return(self) -> None:
+        self.return_requested_at = datetime.now(UTC)
+
+    def accept_return(self) -> None:
+        self.status = OrderStatus.RETURNED
+
+    def dismiss_return_request(self) -> None:
+        self.return_requested_at = None
 
     @staticmethod
     def generate_order_number(today: datetime, daily_sequence: int) -> str:

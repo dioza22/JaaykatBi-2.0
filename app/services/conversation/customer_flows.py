@@ -13,13 +13,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Business, Contact, Conversation, DeliveryType, PaymentMethod, Product
+from app.models import Business, Contact, Conversation, DeliveryType, Order, OrderStatus, PaymentMethod, Product
 from app.services.conversation import state
+from app.services.conversation.order_lookup import resolve_order
 from app.services.conversation.product_lookup import resolve_product
 from app.services.conversation.reply import ANNULER_SECTION, BotReply, with_cancel_button, with_customer_menu
 from app.services.orders.service import InsufficientStockError, create_order, effective_price
 
 ORDER_FLOW = "commander_produit"
+RETURN_REQUEST_FLOW = "demander_retour"
 
 
 async def available_products(db: AsyncSession, business_id: UUID) -> list[Product]:
@@ -254,3 +256,96 @@ async def continue_order_flow(
     # Unknown step — shouldn't happen, but fail safe rather than loop forever.
     state.clear_flow(conversation)
     return with_customer_menu("Une erreur est survenue, reprenons depuis le début.")
+
+
+async def _returnable_orders(db: AsyncSession, contact_id: UUID) -> list[Order]:
+    return (
+        await db.execute(
+            select(Order)
+            .where(
+                Order.contact_id == contact_id,
+                Order.status == OrderStatus.FULFILLED,
+                Order.return_requested_at.is_(None),
+            )
+            .order_by(Order.fulfilled_at.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+
+
+def _returnable_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    rows = [(order.order_number, order.order_number, f"{int(order.total_xof)} FCFA") for order in orders]
+    return [("Commandes livrées", rows), ANNULER_SECTION]
+
+
+async def start_return_flow(db: AsyncSession, contact: Contact, conversation: Conversation) -> BotReply:
+    orders = await _returnable_orders(db, contact.id)
+    if not orders:
+        return with_customer_menu("Vous n'avez pas de commande pouvant faire l'objet d'un retour. -- Jaaykat bi")
+    state.start_flow(conversation, RETURN_REQUEST_FLOW)
+    sections = _returnable_orders_list_sections(orders)
+    return BotReply(
+        text="Quelle commande souhaitez-vous retourner ?",
+        list_button_text="Choisir",
+        list_sections=sections,
+    )
+
+
+async def continue_return_flow(
+    db: AsyncSession,
+    contact: Contact,
+    conversation: Conversation,
+    text: str,
+) -> BotReply:
+    step = state.current_step(conversation)
+    slots = state.current_slots(conversation)
+
+    if step == 0:
+        orders = await _returnable_orders(db, contact.id)
+        order = resolve_order(text, orders)
+        if order is None:
+            sections = _returnable_orders_list_sections(orders)
+            return BotReply(
+                text="Je n'ai pas trouvé cette commande. Merci de choisir dans la liste :",
+                list_button_text="Choisir",
+                list_sections=sections,
+            )
+        slots["order_id"] = str(order.id)
+        state.advance(conversation, 1, slots)
+        return BotReply(
+            text=f"Confirmez-vous vouloir retourner la commande {order.order_number} ({int(order.total_xof)} FCFA) ?",
+            buttons=_CONFIRM_BUTTONS,
+        )
+
+    if step == 1:
+        if "confirmer" in text.lower() or text.strip().lower() == "oui":
+            order = await db.get(Order, UUID(slots["order_id"]))
+            order.request_return()
+            state.clear_flow(conversation)
+            merchant_notification = (
+                f"🔔 Demande de retour pour la commande {order.order_number} "
+                f"({int(order.total_xof)} FCFA). Répondez 'mes commandes' pour la traiter."
+            )
+            return with_customer_menu(
+                f"Votre demande de retour pour la commande {order.order_number} a été transmise au commerçant. "
+                f"-- Jaaykat bi",
+                merchant_notification=merchant_notification,
+            )
+        state.clear_flow(conversation)
+        return with_customer_menu("Demande de retour annulée. -- Jaaykat bi")
+
+    # Unknown step — shouldn't happen, but fail safe rather than loop forever.
+    state.clear_flow(conversation)
+    return with_customer_menu("Une erreur est survenue, reprenons depuis le début.")
+
+
+async def continue_flow(
+    db: AsyncSession,
+    business: Business,
+    contact: Contact,
+    conversation: Conversation,
+    text: str,
+) -> BotReply:
+    if state.current_flow(conversation) == RETURN_REQUEST_FLOW:
+        return await continue_return_flow(db, contact, conversation, text)
+    return await continue_order_flow(db, business, contact, conversation, text)

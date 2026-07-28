@@ -18,9 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Business, Contact, Conversation, Order, OrderStatus, Product, Promotion
 from app.services.conversation import state
 from app.services.conversation.intents import Intent, detect_intent
+from app.services.conversation.order_lookup import resolve_order
 from app.services.conversation.product_lookup import resolve_product
 from app.services.conversation.reply import ANNULER_SECTION, BotReply, with_cancel_button, with_merchant_menu
-from app.services.orders.service import cancel_order, confirm_order, fulfill_order, get_active_promotion
+from app.services.orders.service import (
+    accept_return,
+    cancel_order,
+    confirm_order,
+    dismiss_return_request,
+    fulfill_order,
+    get_active_promotion,
+)
 
 ADD_PRODUCT_FLOW = "ajouter_produit"
 EDIT_PRODUCT_FLOW = "modifier_produit"
@@ -229,7 +237,8 @@ async def _sales_summary(db: AsyncSession, business: Business) -> str:
 
     async def _count_and_revenue(where_today: bool) -> tuple[int, float]:
         stmt = select(func.count(), func.coalesce(func.sum(Order.total_xof), 0)).where(
-            Order.business_id == business.id, Order.status != OrderStatus.CANCELLED
+            Order.business_id == business.id,
+            Order.status.not_in([OrderStatus.CANCELLED, OrderStatus.RETURNED]),
         )
         if where_today:
             stmt = stmt.where(func.date(Order.created_at) == today)
@@ -244,39 +253,64 @@ async def _sales_summary(db: AsyncSession, business: Business) -> str:
     )
 
 
-async def _pending_orders(db: AsyncSession, business_id: UUID) -> list[Order]:
-    return (
-        await db.execute(
-            select(Order)
-            .where(Order.business_id == business_id, Order.status.in_([OrderStatus.PENDING, OrderStatus.CONFIRMED]))
-            .order_by(Order.created_at.asc())
-        )
-    ).scalars().all()
+async def _orders_for_merchant_view(db: AsyncSession, business_id: UUID) -> list[Order]:
+    """Fetches orders grouped by status, fulfilled last (each status capped
+    at 10 rows — WhatsApp's own per-section row limit). Cancelled/returned
+    orders are fully resolved and excluded, same as before."""
+    orders: list[Order] = []
+    for status in (OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.FULFILLED):
+        batch = (
+            await db.execute(
+                select(Order)
+                .where(Order.business_id == business_id, Order.status == status)
+                .order_by(Order.created_at.asc())
+                .limit(10)
+            )
+        ).scalars().all()
+        orders.extend(batch)
+    return orders
+
+
+def _order_row(order: Order) -> tuple[str, str, str]:
+    description = f"{order.customer_name or '?'} — {int(order.total_xof)} FCFA — {order.status.value}"
+    if order.status == OrderStatus.FULFILLED and order.return_requested_at is not None:
+        description = f"⚠️ Retour demandé — {description}"
+    return (order.order_number, order.order_number, description)
 
 
 def _pending_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[tuple[str, str, str]]]]:
-    rows = [
-        (
-            order.order_number,
-            order.order_number,
-            f"{order.customer_name or '?'} — {int(order.total_xof)} FCFA — {order.status.value}",
-        )
-        for order in orders
-    ]
-    return [("Commandes", rows), ANNULER_SECTION]
-
-
-def _resolve_order(text: str, orders: list[Order]) -> Order | None:
-    stripped = text.strip()
-    if stripped.isdigit():
-        idx = int(stripped)
-        if 1 <= idx <= len(orders):
-            return orders[idx - 1]
-    text_upper = stripped.upper()
+    by_status = {
+        OrderStatus.PENDING: [],
+        OrderStatus.CONFIRMED: [],
+        OrderStatus.FULFILLED: [],
+    }
     for order in orders:
-        if order.order_number in text_upper or text_upper in order.order_number:
-            return order
-    return None
+        by_status.setdefault(order.status, []).append(order)
+
+    sections = []
+    labels = {
+        OrderStatus.PENDING: "En attente",
+        OrderStatus.CONFIRMED: "Confirmées",
+        OrderStatus.FULFILLED: "Livrées",
+    }
+    for status in (OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.FULFILLED):
+        rows = [_order_row(order) for order in by_status[status]]
+        if rows:
+            sections.append((labels[status], rows))
+    sections.append(ANNULER_SECTION)
+    return sections
+
+
+def _actions_for_order(order: Order) -> list[tuple[str, str]]:
+    if order.status == OrderStatus.FULFILLED:
+        if order.return_requested_at is not None:
+            return [
+                ("accept_return", "Accepter le retour"),
+                ("dismiss_return", "Ignorer la demande"),
+                ("back", "Retour"),
+            ]
+        return [("back", "Retour")]
+    return _ORDER_ACTIONS_BY_STATUS.get(order.status, [])
 
 
 async def _pending_human_handoffs(db: AsyncSession, business: Business) -> str:
@@ -373,7 +407,7 @@ async def handle_intent(db: AsyncSession, business: Business, conversation: Conv
         return with_merchant_menu(await _sales_summary(db, business))
 
     if intent == Intent.VOIR_COMMANDES:
-        orders = await _pending_orders(db, business.id)
+        orders = await _orders_for_merchant_view(db, business.id)
         if not orders:
             return with_merchant_menu("Aucune commande en attente.")
         state.start_flow(conversation, VIEW_ORDERS_FLOW)
@@ -813,8 +847,8 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
             state.clear_flow(conversation)
             return with_merchant_menu(shortcut_reply)
 
-        orders = await _pending_orders(db, business.id)
-        order = _resolve_order(text, orders)
+        orders = await _orders_for_merchant_view(db, business.id)
+        order = resolve_order(text, orders)
         if order is None:
             if not orders:
                 state.clear_flow(conversation)
@@ -826,12 +860,21 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
             )
         slots["order_number"] = order.order_number
         state.advance(conversation, 1, slots)
-        actions = _ORDER_ACTIONS_BY_STATUS.get(order.status, [])
-        return BotReply(
-            text=f"Commande {order.order_number} — {order.customer_name or '?'} — "
-            f"{int(order.total_xof)} FCFA — {order.status.value}. Que souhaitez-vous faire ?",
-            buttons=actions,
-        )
+        actions = _actions_for_order(order)
+        if order.status == OrderStatus.FULFILLED and order.return_requested_at is None:
+            fulfilled_date = order.fulfilled_at.strftime("%d/%m/%Y") if order.fulfilled_at else "?"
+            text_out = f"Commande {order.order_number} — livrée le {fulfilled_date}. Aucune action requise."
+        elif order.status == OrderStatus.FULFILLED:
+            text_out = (
+                f"Commande {order.order_number} — {order.customer_name or '?'} — "
+                f"{int(order.total_xof)} FCFA — ⚠️ retour demandé. Que souhaitez-vous faire ?"
+            )
+        else:
+            text_out = (
+                f"Commande {order.order_number} — {order.customer_name or '?'} — "
+                f"{int(order.total_xof)} FCFA — {order.status.value}. Que souhaitez-vous faire ?"
+            )
+        return BotReply(text=text_out, buttons=actions)
 
     if step == 1:
         order = await db.scalar(
@@ -843,8 +886,18 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
 
         t = text.strip().lower()
 
+        if "accepter" in t and order.status == OrderStatus.FULFILLED and order.return_requested_at is not None:
+            await accept_return(order)
+            state.clear_flow(conversation)
+            return with_merchant_menu(f"{order.order_number} marquée comme retournée/remboursée.")
+
+        if "ignorer" in t and order.status == OrderStatus.FULFILLED and order.return_requested_at is not None:
+            await dismiss_return_request(order)
+            state.clear_flow(conversation)
+            return with_merchant_menu(f"Demande de retour ignorée pour {order.order_number}.")
+
         if "retour" in t:
-            orders = await _pending_orders(db, business.id)
+            orders = await _orders_for_merchant_view(db, business.id)
             if not orders:
                 state.clear_flow(conversation)
                 return with_merchant_menu("Aucune commande en attente.")
@@ -870,7 +923,7 @@ async def _continue_view_orders(db: AsyncSession, business: Business, conversati
             state.clear_flow(conversation)
             return with_merchant_menu(f"{order.order_number} a été annulée.")
 
-        actions = _ORDER_ACTIONS_BY_STATUS.get(order.status, [])
+        actions = _actions_for_order(order)
         if not actions:
             state.clear_flow(conversation)
             return with_merchant_menu(f"{order.order_number} est déjà {order.status.value}.")
