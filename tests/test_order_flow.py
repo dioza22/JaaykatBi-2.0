@@ -1,7 +1,11 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import select
 
-from app.models import Business, Contact, Conversation, Order, OrderStatus, Product
+from app.models import Business, Contact, Conversation, Order, OrderStatus, Product, Promotion
+from app.services.conversation import engine
+from app.services.conversation.customer_flows import _format_catalog
 from app.services.conversation.engine import handle_message
 
 pytestmark = pytest.mark.asyncio
@@ -141,6 +145,40 @@ async def test_order_flow_can_be_cancelled_mid_flow(db_session):
 
     await db_session.refresh(product)
     assert product.quantity_in_stock == 10  # untouched
+
+
+async def test_customer_llm_fallback_prompt_uses_promo_aware_catalog_and_discipline_rules(db_session, monkeypatch):
+    business, product, contact, conversation = await _setup(db_session)
+    db_session.add(
+        Promotion(
+            business_id=business.id, product_id=product.id, title="Promo -10%",
+            discount_percent=10, duration_days=7, end_date=datetime.now(UTC) + timedelta(days=7),
+        )
+    )
+    await db_session.flush()
+
+    captured_prompt = {}
+
+    async def fake_generate(system_prompt, history, text):
+        captured_prompt["value"] = system_prompt
+        return "Oui, la livraison est disponible pour ce produit."
+
+    monkeypatch.setattr(engine._llm_client, "generate", fake_generate)
+
+    await handle_message(
+        db_session, business, contact, conversation, "Vous livrez à la Médina ?", is_merchant=False
+    )
+
+    prompt = captured_prompt["value"]
+    # promo-aware price reaches the LLM — not the old build_system_prompt's flat, non-discounted price
+    assert "~~4500~~ 4050 FCFA (promo)" in prompt
+    assert "SEULE source" in prompt
+    assert "SALUTATIONS" in prompt
+    assert "Ne répète et ne reformule jamais une réponse déjà donnée" in prompt
+
+
+async def test_format_catalog_reports_unavailable_gracefully_when_empty(db_session):
+    assert await _format_catalog(db_session, []) == "(catalogue non disponible pour le moment)"
 
 
 async def test_order_flow_rejects_quantity_exceeding_stock(db_session):

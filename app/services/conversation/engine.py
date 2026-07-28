@@ -179,7 +179,8 @@ async def handle_message(
         return BotReply(text=faq.answer)
 
     products = await customer_flows.available_products(db, business.id)
-    system_prompt = build_system_prompt(business, products)
+    catalog_summary = await customer_flows._format_catalog(db, products)
+    system_prompt = build_system_prompt(business, catalog_summary)
     history = await _message_history(db, conversation.id)
     reply_text = await _llm_client.generate(system_prompt, history, text)
 

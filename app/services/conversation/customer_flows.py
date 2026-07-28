@@ -35,6 +35,8 @@ async def available_products(db: AsyncSession, business_id: UUID) -> list[Produc
 
 
 async def _format_catalog(db: AsyncSession, products: list[Product]) -> str:
+    if not products:
+        return "(catalogue non disponible pour le moment)"
     lines = []
     for i, product in enumerate(products, start=1):
         price = await effective_price(db, product)
