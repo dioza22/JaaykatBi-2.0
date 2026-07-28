@@ -11,6 +11,7 @@ from app.models import Message as MessageModel
 from app.models import Order, OrderStatus
 from app.services.ai.llm_client import LLMClient
 from app.services.ai.prompts import build_merchant_system_prompt, build_system_prompt
+from app.services.analytics.service import build_merchant_analytics
 from app.services.conversation import customer_flows, merchant_flows, state
 from app.services.conversation.intents import Intent, detect_intent
 from app.services.conversation.reply import BotReply, with_customer_menu, with_merchant_menu
@@ -92,8 +93,8 @@ async def _merchant_llm_fallback(
     flag's only consumer is the merchant's own "messages en attente" list —
     flagging the merchant's own conversation on it would be nonsensical)."""
     products = await merchant_flows._products(db, business.id)
-    sales_summary = await merchant_flows._sales_summary(db, business)
-    system_prompt = build_merchant_system_prompt(business, products, sales_summary)
+    analytics = await build_merchant_analytics(db, business)
+    system_prompt = build_merchant_system_prompt(business, products, analytics)
     history = await _message_history(db, conversation.id)
     reply_text = await _llm_client.generate(system_prompt, history, text)
 

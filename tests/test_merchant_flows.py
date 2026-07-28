@@ -540,6 +540,34 @@ async def test_merchant_unmatched_question_falls_back_to_llm(db_session, monkeyp
     assert conversation.state.get("flow") is None  # this is a plain Q&A, not a flow
 
 
+async def test_merchant_llm_fallback_prompt_carries_analytics_and_greeting_rule(db_session, monkeypatch):
+    business, product, contact, conversation = await _setup(db_session)
+    customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
+    db_session.add(customer)
+    await db_session.flush()
+    await create_order(
+        db_session, business, customer, product, 1, "Client Test",
+        DeliveryType.PICKUP, None, PaymentMethod.CASH,
+    )
+    await db_session.flush()
+
+    captured_prompt = {}
+
+    async def fake_generate(system_prompt, history, text):
+        captured_prompt["value"] = system_prompt
+        return "Vos ventes sont de 4500 FCFA aujourd'hui."
+
+    monkeypatch.setattr(engine._llm_client, "generate", fake_generate)
+
+    await _merchant_says(db_session, business, contact, conversation, "Quel produit devrais-je mettre en avant ?")
+
+    prompt = captured_prompt["value"]
+    assert "expert en marketing et analyste de données" in prompt
+    assert "SEULE source de chiffres" in prompt
+    assert "SALUTATIONS" in prompt
+    assert "4500 FCFA" in prompt  # today's revenue, sourced from the DB via build_merchant_analytics
+
+
 async def test_merchant_llm_fallback_failure_gives_a_plain_retry_message(db_session, monkeypatch):
     business, product, contact, conversation = await _setup(db_session)
 
