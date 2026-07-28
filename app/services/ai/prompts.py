@@ -2,7 +2,7 @@
 the deterministic FSM flows don't use this). Ported from the old build's
 `BuildSystemPrompt`, itself derived from the Charte Conversationnelle."""
 
-from app.models import Business
+from app.models import Business, Product
 
 
 def build_system_prompt(business: Business, catalog_summary: str) -> str:
