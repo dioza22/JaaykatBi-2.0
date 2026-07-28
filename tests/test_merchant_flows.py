@@ -16,7 +16,7 @@ from app.models import (
 )
 from app.services.conversation import engine, state
 from app.services.conversation.engine import handle_message
-from app.services.orders.service import confirm_order, create_order
+from app.services.orders.service import confirm_order, create_order, fulfill_order
 
 pytestmark = pytest.mark.asyncio
 
@@ -476,6 +476,51 @@ async def test_pending_orders_retour_goes_back_to_the_list(db_session):
     assert order.order_number in _row_titles(reply)
     assert conversation.state["step"] == 0  # back at the list, flow still active
     assert conversation.state["flow"] == "voir_commandes"
+
+
+async def test_pending_orders_list_never_exceeds_whatsapp_total_row_cap(db_session):
+    """Regression test: WhatsApp's interactive list caps rows at 10 TOTAL
+    across every section combined, not 10 per section. Grouping orders into
+    3 status sections (each independently fetched) can add up to more than
+    10 rows once a business has enough order history — exactly what caused
+    a real production failure (error 131009, silently swallowed, merchant
+    got no reply at all)."""
+    business, product, contact, conversation = await _setup(db_session)
+    product.quantity_in_stock = 20  # enough for the 12 one-unit orders below
+    customer = Contact(business_id=business.id, wa_id="221770009999", phone_number="221770009999")
+    db_session.add(customer)
+    await db_session.flush()
+
+    # 3 pending + 3 confirmed + 5 fulfilled (last one with a return request) = 11 orders total.
+    # Pending/confirmed fully fit the budget (6 of 9), leaving room for only 3 of
+    # the 5 fulfilled rows — the return-flagged one must be among the survivors.
+    for _ in range(3):
+        await create_order(
+            db_session, business, customer, product, 1, "Client Test", DeliveryType.PICKUP, None, PaymentMethod.CASH,
+        )
+    for _ in range(3):
+        order = await create_order(
+            db_session, business, customer, product, 1, "Client Test", DeliveryType.PICKUP, None, PaymentMethod.CASH,
+        )
+        await confirm_order(order)
+    flagged_fulfilled_order = None
+    for i in range(5):
+        order = await create_order(
+            db_session, business, customer, product, 1, "Client Test", DeliveryType.PICKUP, None, PaymentMethod.CASH,
+        )
+        await confirm_order(order)
+        await fulfill_order(order)
+        if i == 4:
+            order.request_return()
+            flagged_fulfilled_order = order
+    await db_session.flush()
+
+    reply = await _merchant_says(db_session, business, contact, conversation, "mes commandes")
+
+    total_rows = sum(len(rows) for _label, rows in reply.list_sections)
+    assert total_rows <= 10
+    # the return-flagged fulfilled order must survive truncation over a plain one
+    assert flagged_fulfilled_order.order_number in _row_titles(reply)
 
 
 async def test_catalog_view_groups_by_category_with_stock_numbers(db_session):

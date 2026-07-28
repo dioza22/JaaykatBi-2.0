@@ -20,7 +20,7 @@ from app.services.conversation import state
 from app.services.conversation.intents import Intent, detect_intent
 from app.services.conversation.order_lookup import resolve_order
 from app.services.conversation.product_lookup import resolve_product
-from app.services.conversation.reply import ANNULER_SECTION, BotReply, with_cancel_button, with_merchant_menu
+from app.services.conversation.reply import ANNULER_SECTION, BotReply, cap_total_rows, with_cancel_button, with_merchant_menu
 from app.services.orders.service import (
     accept_return,
     cancel_order,
@@ -107,7 +107,7 @@ def _product_list_sections(
         for p in products
         if str(p.id) not in exclude_ids
     ]
-    return [("Produits", rows), ANNULER_SECTION]
+    return cap_total_rows([("Produits", rows)]) + [ANNULER_SECTION]
 
 
 def _distinct_categories(products: list[Product]) -> list[tuple[str, int]]:
@@ -122,7 +122,7 @@ def _distinct_categories(products: list[Product]) -> list[tuple[str, int]]:
 
 def _category_list_sections(products: list[Product]) -> list[tuple[str, list[tuple[str, str, str]]]]:
     rows = [(name, name, f"{count} produit(s)") for name, count in _distinct_categories(products)]
-    return [("Catégories", rows), ANNULER_SECTION]
+    return cap_total_rows([("Catégories", rows)]) + [ANNULER_SECTION]
 
 
 def _resolve_category(text: str, categories: list[tuple[str, int]]) -> str | None:
@@ -157,7 +157,7 @@ async def _promotion_list_sections(
         end_date = promo.end_date if promo.end_date.tzinfo else promo.end_date.replace(tzinfo=UTC)
         days_left = max(0, (end_date - datetime.now(UTC)).days)
         rows.append((str(promo.id), name, f"-{promo.discount_percent}% — {days_left}j restants"))
-    return [("Promotions en cours", rows), ANNULER_SECTION]
+    return cap_total_rows([("Promotions en cours", rows)]) + [ANNULER_SECTION]
 
 
 def _resolve_active_promotion(text: str, promotions: list[Promotion], names: dict[str, str]) -> Promotion | None:
@@ -255,9 +255,10 @@ async def _sales_summary(db: AsyncSession, business: Business) -> str:
 
 
 async def _orders_for_merchant_view(db: AsyncSession, business_id: UUID) -> list[Order]:
-    """Fetches orders grouped by status, fulfilled last (each status capped
-    at 10 rows — WhatsApp's own per-section row limit). Cancelled/returned
-    orders are fully resolved and excluded, same as before."""
+    """Fetches orders grouped by status, fulfilled last (capped at 10 rows
+    per status here as a sanity ceiling — the actual WhatsApp-facing cap of
+    10 rows TOTAL across the whole list is enforced by cap_total_rows() in
+    _pending_orders_list_sections). Cancelled/returned orders are excluded."""
     orders: list[Order] = []
     for status in (OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.FULFILLED):
         batch = (
@@ -287,6 +288,10 @@ def _pending_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[t
     }
     for order in orders:
         by_status.setdefault(order.status, []).append(order)
+    # Within "Livrées", a return request needs the merchant's attention —
+    # if the list has to be truncated (see cap_total_rows below), those
+    # should survive over a fulfilled order that needs no action at all.
+    by_status[OrderStatus.FULFILLED].sort(key=lambda o: o.return_requested_at is None)
 
     sections = []
     labels = {
@@ -298,8 +303,7 @@ def _pending_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[t
         rows = [_order_row(order) for order in by_status[status]]
         if rows:
             sections.append((labels[status], rows))
-    sections.append(ANNULER_SECTION)
-    return sections
+    return cap_total_rows(sections) + [ANNULER_SECTION]
 
 
 def _actions_for_order(order: Order) -> list[tuple[str, str]]:

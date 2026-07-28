@@ -17,7 +17,7 @@ from app.models import Business, Contact, Conversation, DeliveryType, Order, Ord
 from app.services.conversation import state
 from app.services.conversation.order_lookup import resolve_order
 from app.services.conversation.product_lookup import resolve_product
-from app.services.conversation.reply import ANNULER_SECTION, BotReply, with_cancel_button, with_customer_menu
+from app.services.conversation.reply import ANNULER_SECTION, BotReply, cap_total_rows, with_cancel_button, with_customer_menu
 from app.services.orders.service import (
     InsufficientStockError,
     cancel_order,
@@ -65,7 +65,7 @@ async def _product_list_sections(
         else:
             description = f"{int(price)} FCFA"
         rows.append((str(product.id), product.name, description))
-    sections = [("Produits", rows)]
+    sections = cap_total_rows([("Produits", rows)])
     if include_cancel:
         sections.append(ANNULER_SECTION)
     return sections
@@ -380,8 +380,7 @@ def _ongoing_orders_list_sections(orders: list[Order]) -> list[tuple[str, list[t
         ]
         if rows:
             sections.append((labels[status], rows))
-    sections.append(ANNULER_SECTION)
-    return sections
+    return cap_total_rows(sections) + [ANNULER_SECTION]
 
 
 async def _get_contact_order(db: AsyncSession, contact_id: UUID, order_number: str | None) -> Order | None:

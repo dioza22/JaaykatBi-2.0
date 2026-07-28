@@ -91,6 +91,28 @@ async def test_ongoing_orders_grouped_by_status_excludes_fulfilled(db_session):
     assert fulfilled_order.order_number not in row_titles
 
 
+async def test_ongoing_orders_list_never_exceeds_whatsapp_total_row_cap(db_session):
+    """Regression test: WhatsApp's interactive list caps rows at 10 TOTAL
+    across every section, not 10 per section — the bug that silently broke
+    the merchant's grouped order list in production (error 131009, swallowed
+    by message_handler's broad except, no reply ever sent)."""
+    business, product, customer, conversation = await _setup(db_session)
+    product.quantity_in_stock = 20
+    await db_session.flush()
+
+    for _ in range(6):
+        await _place_order(db_session, business, product, customer)
+    for _ in range(6):
+        order = await _place_order(db_session, business, product, customer)
+        await confirm_order(order)
+    await db_session.flush()
+
+    reply = await _customer_says(db_session, business, customer, conversation, "mes commandes")
+
+    total_rows = sum(len(rows) for _label, rows in reply.list_sections)
+    assert total_rows <= 10
+
+
 async def test_ongoing_orders_empty_state(db_session):
     business, product, customer, conversation = await _setup(db_session)
 

@@ -33,6 +33,33 @@ ANNULER_SECTION: tuple[str, list[tuple[str, str, str]]] = (
     "Autre", [("annuler", "Annuler", "Annuler l'opération en cours")]
 )
 
+# WhatsApp's interactive list cap is 10 rows TOTAL across every section in
+# the message combined — not 10 per section. Confirmed the hard way: error
+# 131009 ("Total row count exceed max allowed count: 10") the first time a
+# grouped order list (multiple sections, each independently capped at 10)
+# crossed 10 rows overall. Every multi-section list builder must run its
+# rows through this before appending ANNULER_SECTION.
+MAX_LIST_ROWS_BEFORE_ANNULER = 9
+
+
+def cap_total_rows(
+    sections: list[tuple[str, list[tuple[str, str, str]]]], max_rows: int = MAX_LIST_ROWS_BEFORE_ANNULER
+) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    """Keeps at most `max_rows` rows total across all sections, earlier
+    sections' rows kept first — so higher-priority sections (e.g. pending
+    orders before fulfilled ones) survive truncation before lower-priority
+    ones. Drops a section entirely once its budget hits zero."""
+    capped = []
+    remaining = max_rows
+    for label, rows in sections:
+        if remaining <= 0:
+            break
+        kept = rows[:remaining]
+        if kept:
+            capped.append((label, kept))
+        remaining -= len(kept)
+    return capped
+
 MERCHANT_MENU_SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
     (
         "Actions",
