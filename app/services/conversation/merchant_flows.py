@@ -330,15 +330,34 @@ async def _customer_status_notification(db: AsyncSession, order: Order, text: st
     return (contact.wa_id, text)
 
 
+def _order_details_block(order: Order) -> str:
+    """Same information the customer sees in "Mes commandes" (order ID,
+    product, quantity, total, date) — just laid out line by line since a
+    plain-text notification has no list rows to put it in."""
+    item = order.items[0]
+    date_str = order.created_at.strftime("%d/%m/%Y")
+    return (
+        f"📦 Commande : {order.order_number}\n"
+        f"🛒 Produit : {item.product_name} x{item.quantity}\n"
+        f"💰 Total : {int(order.total_xof)} FCFA\n"
+        f"📅 Date : {date_str}"
+    )
+
+
 def _order_confirmed_notification_text(order: Order) -> str:
-    return f"✅ Bonne nouvelle ! Votre commande {order.order_number} a été confirmée et est en cours de préparation. -- Jaaykat bi"
+    return (
+        f"✅ Bonne nouvelle ! Votre commande a été confirmée et est en cours de préparation.\n\n"
+        f"{_order_details_block(order)}\n\n"
+        f"-- Jaaykat bi"
+    )
 
 
 def _order_fulfilled_notification_text(order: Order) -> str:
     delivery_word = "récupérée en boutique" if order.delivery_type == DeliveryType.PICKUP else "livrée"
     return (
-        f"🎉📦 Votre commande {order.order_number} a été {delivery_word} avec succès. "
-        f"Merci pour votre confiance ! -- Jaaykat bi"
+        f"🎉📦 Votre commande a été {delivery_word} avec succès. Merci pour votre confiance !\n\n"
+        f"{_order_details_block(order)}\n\n"
+        f"-- Jaaykat bi"
     )
 
 

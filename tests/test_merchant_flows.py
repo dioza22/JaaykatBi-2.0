@@ -406,6 +406,11 @@ async def test_pending_orders_guided_list_and_submenu_confirm(db_session):
     assert wa_id == customer.wa_id
     assert order.order_number in notif_text
     assert "✅" in notif_text
+    # same info as the "Mes commandes" list rows, just laid out line by line
+    assert product.name in notif_text
+    assert "x1" in notif_text
+    assert "4500 FCFA" in notif_text
+    assert order.created_at.strftime("%d/%m/%Y") in notif_text
     await db_session.flush()
     await db_session.refresh(order)
     assert order.status == OrderStatus.CONFIRMED
@@ -441,6 +446,9 @@ async def test_pending_orders_submenu_fulfill_action_via_button_tap(db_session):
     assert wa_id == customer.wa_id
     assert order.order_number in notif_text
     assert "récupérée en boutique" in notif_text  # PICKUP order — worded accordingly
+    assert product.name in notif_text
+    assert "x1" in notif_text
+    assert "4500 FCFA" in notif_text
 
     await db_session.flush()
     await db_session.refresh(order)
